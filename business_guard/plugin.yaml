@@ -1,0 +1,6 @@
+name: business-guard
+version: 0.1.0
+description: "Block business-workspace access to Hermes config, secrets, audit tokens, session stores, and internal/browser file URLs."
+author: "Hermes Portal"
+provides_hooks:
+  - pre_tool_call

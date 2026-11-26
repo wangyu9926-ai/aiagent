@@ -1,0 +1,1 @@
+"""Business guard unit tests."""

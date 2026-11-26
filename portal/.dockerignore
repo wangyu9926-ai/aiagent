@@ -1,0 +1,8 @@
+data/
+.e2e-data/
+__pycache__/
+*.pyc
+tests/
+README.md
+Dockerfile
+.dockerignore

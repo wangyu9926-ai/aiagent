@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes Portal · 登录</title>
+  <link rel="stylesheet" href="/static/app.css?v=0.1.5">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-card">
+      <div class="brand">
+        <div class="brand-mark">HP</div>
+        <div>
+          <div class="brand-name">Hermes Portal</div>
+          <div class="brand-sub">多用户 Agent 监管台</div>
+        </div>
+      </div>
+
+      <h1>登录</h1>
+      <p class="muted">只有被授权的成员才能进入。所有对话、模型调用和工具执行都会留下审计记录。</p>
+
+      <form id="login-form" method="post" action="/api/auth/login">
+        <label class="field">
+          <span>用户名</span>
+          <input id="username" name="username" autocomplete="username" required autofocus>
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="btn btn-primary" id="login-btn" type="submit">进入监管台</button>
+        <p class="error" id="login-error" role="alert" hidden></p>
+      </form>
+
+      <p class="footnote">
+        首次启动的账号密码在 <code>portal/data/initial-admin.txt</code>；
+        也可以用 <code>python -m portal.cli create-user</code> 创建账号。
+      </p>
+    </section>
+  </main>
+  <script src="/static/login.js?v=0.1.5"></script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+services:
+  portal:
+    build:
+      context: ./portal
+      dockerfile: Dockerfile
+    image: hermes-portal:local
+    container_name: hermes-portal
+    restart: unless-stopped
+    ports:
+      - "${PORTAL_BIND:-0.0.0.0}:9181:9180"
+    environment:
+      PORTAL_DATA_DIR: /data
+      PORTAL_UPLOAD_DIR: /uploads
+      PORTAL_ADMIN_USER: "${PORTAL_ADMIN_USER:-admin}"
+      # Empty on first start => portal generates one into initial-admin.txt.
+      PORTAL_ADMIN_PASSWORD: "${PORTAL_ADMIN_PASSWORD:-}"
+      PORTAL_SECURE_COOKIES: "${PORTAL_SECURE_COOKIES:-0}"
+    volumes:
+      - hermes-portal-data:/data
+      - ./portal/.e2e-data/uploads:/uploads
+    networks:
+      - hermes-tenant-net
+      - hermes-public-net
+    depends_on:
+      - tenant-visitor
+
+  # Opt-in HTTPS edge: `docker compose --profile tls up -d`.
+  # Public domain: copy deploy/Caddyfile semantics and set PORTAL_DOMAIN.
+  # LAN/self-signed: set CADDYFILE=Caddyfile.internal and trust Caddy's CA.
+  # Set PORTAL_SECURE_COOKIES=1 whenever the browser reaches the portal over HTTPS.
+  caddy:
+    image: caddy:2-alpine
+    container_name: hermes-caddy
+    restart: unless-stopped
+    profiles: ["tls"]
+    ports:
+      - "${PORTAL_HTTP_PORT:-80}:80"
+      - "${PORTAL_HTTPS_PORT:-443}:443"
+    environment:
+      PORTAL_DOMAIN: "${PORTAL_DOMAIN:-localhost}"
+    volumes:
+      - ./deploy/${CADDYFILE:-Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - hermes-public-net
+    depends_on:
+      - portal
+
+  egress:
+    image: hermes-portal:local
+    container_name: hermes-egress
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "portal.egress_proxy:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      EGRESS_UPSTREAM: "${EGRESS_UPSTREAM:-http://host.docker.internal:7864}"
+    env_file:
+      - ../hermes-tenants/egress.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - hermes-tenant-net
+      - hermes-egress-net
+
+  egress-web:
+    image: hermes-portal:local
+    container_name: hermes-egress-web
+    restart: unless-stopped
+    command: ["python", "-m", "portal.web_egress"]
+    environment:
+      WEB_EGRESS_ALLOW_ALL: "1"
+      WEB_EGRESS_ALLOW_PORTS: "80,443"
+      # Local VPN/proxy fake-DNS range used by this workstation (Clash-style).
+      WEB_EGRESS_ALLOW_CIDRS: "198.18.0.0/15"
+    networks:
+      - hermes-tenant-net
+      - hermes-egress-net
+
+  tenant-business:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-tenant-business
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    env_file:
+      - ../hermes-tenants/business-hermes/.env
+    volumes:
+      - hermes-business-data:/opt/data
+      - ./portal/.e2e-data/uploads:/uploads
+    environment:
+      HTTP_PROXY: http://egress-web:8081
+      HTTPS_PROXY: http://egress-web:8081
+      ALL_PROXY: http://egress-web:8081
+      NO_PROXY: localhost,127.0.0.1,hermes-tenant-business,portal,egress,egress-web
+      # The shared /uploads mount is tenant-isolated by business-guard.
+      HERMES_BUSINESS_UPLOAD_ROOT: /uploads/business
+    networks:
+      - hermes-tenant-net
+    depends_on:
+      - egress
+      - egress-web
+
+  tenant-visitor:
+    image: hermes-tenant-current:local
+    container_name: hermes-tenant-visitor
+    restart: unless-stopped
+    command: ["python", "-m", "hermes_cli.main", "gateway", "run"]
+    env_file:
+      - ../hermes-tenants/visitor-hermes-docker/.env
+    volumes:
+      - hermes-visitor-data:/opt/data
+      - ./portal/.e2e-data/uploads:/uploads
+    environment:
+      HTTP_PROXY: http://egress-web:8081
+      HTTPS_PROXY: http://egress-web:8081
+      ALL_PROXY: http://egress-web:8081
+      NO_PROXY: localhost,127.0.0.1,hermes-tenant-visitor,portal,egress,egress-web
+    networks:
+      - hermes-tenant-net
+    depends_on:
+      - egress
+      - egress-web
+
+networks:
+  # Tenant <-> portal <-> egress only. No route to the host or internet.
+  hermes-tenant-net:
+    driver: bridge
+    internal: true
+  # Portal's published browser port.
+  hermes-public-net:
+    driver: bridge
+  # Egress proxy's route to the host model endpoint.
+  hermes-egress-net:
+    driver: bridge
+
+volumes:
+  # SQLite state lives on Docker-native volumes: bind mounts go through the
+  # Docker Desktop VM boundary, where SQLite WAL shared memory is unsafe.
+  # Create these once on a fresh host:
+  #   docker volume create hermes-portal-data
+  #   docker volume create hermes-visitor-data
+  #   docker volume create hermes-business-data
+  hermes-portal-data:
+    external: true
+  hermes-visitor-data:
+    external: true
+  hermes-business-data:
+    external: true
+  caddy-data:
+  caddy-config:

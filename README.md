@@ -3,6 +3,9 @@
 </p>
 
 # Hermes Agent ☤
+
+> **Fork addition:** this tree ships **Hermes Portal** — a multi-user web gateway with per-tenant isolation, append-only hash-chained audit, admin approvals, background runs, and project onboarding. See [portal/README.md](portal/README.md).
+
 <p align="center">
   <a href="https://hermes-agent.nousresearch.com/">Hermes Agent</a> | <a href="https://hermes-agent.nousresearch.com/">Hermes Desktop</a>
 </p>

@@ -1,0 +1,20 @@
+# LAN/internal HTTPS with Caddy's local CA. Clients must trust Caddy's
+# root certificate (`docker exec hermes-caddy cat /data/caddy/pki/authorities/local/root.crt`)
+# or the browser will warn. Use Caddyfile with a real domain for public use.
+{$PORTAL_DOMAIN:localhost} {
+	tls internal
+	encode zstd gzip
+	reverse_proxy portal:9180
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

@@ -150,3 +150,9 @@ plans/
 /*.png.bak
 *.tar.gz
 *.tgz
+
+# Hermes Portal additions (not part of the tenant image)
+portal/
+business_guard/
+portal_audit/
+portal/.e2e-data/
