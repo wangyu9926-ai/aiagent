@@ -42,6 +42,8 @@ class Settings:
     bind_host: str
     bind_port: int
     upload_dir: Path | None = None
+    datalab_url: str = ""
+    datalab_token: str = ""
 
     @property
     def static_dir(self) -> Path:
@@ -68,6 +70,8 @@ def load_settings() -> Settings:
         bind_host=os.environ.get("PORTAL_HOST", "127.0.0.1"),
         bind_port=_env_int("PORTAL_PORT", 9180),
         upload_dir=upload_dir,
+        datalab_url=os.environ.get("DATALAB_URL", "").strip(),
+        datalab_token=os.environ.get("DATALAB_TOKEN", "").strip(),
     )
 
 

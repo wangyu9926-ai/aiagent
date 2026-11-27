@@ -1,0 +1,6 @@
+name: datalab
+version: 0.1.0
+description: "Read-only CSV/Excel/JSON/Parquet analysis through the server-side DataLab worker. Credentials and database connectors stay server-side."
+author: "Hermes Portal"
+provides_tools:
+  - datalab_query

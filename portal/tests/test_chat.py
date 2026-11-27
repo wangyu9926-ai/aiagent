@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import tempfile
 import unittest
@@ -47,7 +48,7 @@ class ChatTests(unittest.TestCase):
         self.client = TestClient(self.app)
         self.client.__enter__()
         self.admin_csrf = self.login(self.client, "admin", ADMIN_PASSWORD)
-        self.create_tenant("team-chat")
+        self.tenant_token = self.create_tenant("team-chat")
         self.create_user("alice", "alice-pass-123", "member", "team-chat")
         self.create_user("reader", "reader-pass-123", "viewer", "team-chat")
         self.set_runtime("team-chat", "http://upstream.test", "sk-upstream", "demo-model")
@@ -68,13 +69,14 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["csrf"]
 
-    def create_tenant(self, tenant_id: str, name: str = "聊天团队") -> None:
+    def create_tenant(self, tenant_id: str, name: str = "聊天团队") -> str:
         response = self.client.post(
             "/api/tenants",
             json={"name": name, "id": tenant_id},
             headers={"X-Portal-CSRF": self.admin_csrf},
         )
         self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["token"]
 
     def create_user(self, username: str, password: str, role: str, tenant_id: str | None = None) -> None:
         response = self.client.post(
@@ -407,6 +409,64 @@ class ChatTests(unittest.TestCase):
                 f"/api/chat/conversations/{conversation['id']}/messages"
             ).json()["messages"]
             self.assertEqual(messages[0]["meta"]["skills"], ["data-analysis"])
+        finally:
+            alice.__exit__(None, None, None)
+
+    def test_datalab_proxy_validates_workspace_and_forwards_tenant_token(self) -> None:
+        self.app.state.settings = dataclasses.replace(
+            self.app.state.settings,
+            datalab_url="http://datalab.test:8090",
+            datalab_token="worker-secret",
+        )
+        alice, csrf = self.user_client("alice", "alice-pass-123")
+        try:
+            conversation = self.make_conversation(alice, csrf)
+            upload_root = self.settings.upload_dir or self.settings.data_dir / "uploads"
+            workspace = upload_root / "team-chat" / conversation["id"] / "local"
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+            seen = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                seen["path"] = request.url.path
+                seen["token"] = request.headers.get("x-datalab-token")
+                seen["body"] = json.loads(request.content)
+                return httpx.Response(
+                    200,
+                    json={"columns": ["n"], "rows": [[1]], "row_count": 1, "truncated": False},
+                )
+
+            self.app.state.http_transport = httpx.MockTransport(handler)
+            response = alice.post(
+                "/api/datalab/query",
+                json={
+                    "conversation_id": conversation["id"],
+                    "tables": [
+                        {
+                            "path": f"/uploads/team-chat/{conversation['id']}/local/data.csv",
+                            "table": "data",
+                        }
+                    ],
+                    "sql": "select count(*) as n from data",
+                    "limit": 10,
+                },
+                headers={"Authorization": f"Bearer {self.tenant_token}"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["rows"], [[1]])
+            self.assertEqual(seen["path"], "/query")
+            self.assertEqual(seen["token"], "worker-secret")
+            self.assertEqual(seen["body"]["tables"][0]["path"], f"team-chat/{conversation['id']}/local/data.csv")
+            blocked = alice.post(
+                "/api/datalab/query",
+                json={
+                    "conversation_id": conversation["id"],
+                    "tables": [{"path": "/uploads/team-chat/other/data.csv", "table": "data"}],
+                    "sql": "select 1",
+                },
+                headers={"Authorization": f"Bearer {self.tenant_token}"},
+            )
+            self.assertEqual(blocked.status_code, 403)
         finally:
             alice.__exit__(None, None, None)
 

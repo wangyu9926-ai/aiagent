@@ -315,6 +315,19 @@ class LocalFolderIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class DatalabTableIn(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    table: str = Field(default="", max_length=80)
+    sheet: str | int | None = None
+
+
+class DatalabQueryIn(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=64)
+    tables: list[DatalabTableIn] = Field(min_length=1, max_length=10)
+    sql: str = Field(min_length=1, max_length=50_000)
+    limit: int = Field(default=200, ge=1, le=2000)
+
+
 class ChatIn(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
     attachment_ids: list[str] = Field(default_factory=list, max_length=5)
@@ -598,6 +611,76 @@ def skill_detail(skill_id: str, user=Depends(current_user), conn=Depends(_get_co
         if item.get("id") == skill_id:
             return {**skill, "content": _skill_content(item)}
     raise HTTPException(status_code=404, detail="技能不存在")
+
+
+# ---------------------------------------------------------------------------
+# DataLab proxy (tenant-token authenticated)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/datalab/query")
+async def datalab_query(
+    body: DatalabQueryIn,
+    request: Request,
+    conn=Depends(_get_conn),
+):
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="缺少 Bearer 租户令牌")
+    tenant = db.get_tenant_by_token(conn, header[7:].strip())
+    if tenant is None:
+        raise HTTPException(status_code=401, detail="租户令牌无效或已停用")
+    conversation = db.get_conversation(conn, body.conversation_id)
+    if conversation is None or conversation["tenant_id"] != tenant["id"]:
+        raise HTTPException(status_code=404, detail="会话不存在或不属于该租户")
+    settings = request.app.state.settings
+    if not settings.datalab_url or not settings.datalab_token:
+        raise HTTPException(status_code=503, detail="DataLab 尚未配置")
+    upload_root = settings.upload_dir or (settings.data_dir / "uploads")
+    workspace = (upload_root / tenant["id"] / conversation["id"]).resolve()
+    tables: list[dict[str, Any]] = []
+    for index, item in enumerate(body.tables):
+        raw = item.path.replace("\\", "/").strip()
+        if raw.startswith("/uploads/"):
+            raw = raw[len("/uploads/"):]
+        elif raw.startswith("/"):
+            raise HTTPException(status_code=400, detail="DataLab 只接受会话工作区内的文件")
+        pure = PurePosixPath(raw)
+        if pure.is_absolute() or ".." in pure.parts or not pure.parts:
+            raise HTTPException(status_code=400, detail="DataLab 文件路径不合法")
+        full = (upload_root / Path(*pure.parts)).resolve()
+        if not full.is_relative_to(workspace):
+            raise HTTPException(status_code=403, detail="DataLab 只能读取该会话工作区")
+        if not full.is_file():
+            raise HTTPException(status_code=404, detail=f"DataLab 文件不存在：{pure.as_posix()}")
+        tables.append(
+            {
+                "path": pure.as_posix(),
+                "table": item.table or f"t{index + 1}",
+                "sheet": item.sheet,
+            }
+        )
+    payload = {"tables": tables, "sql": body.sql, "limit": body.limit}
+    try:
+        async with httpx.AsyncClient(
+            timeout=90.0, transport=request.app.state.http_transport
+        ) as client:
+            response = await client.post(
+                settings.datalab_url.rstrip("/") + "/query",
+                headers={
+                    "X-Datalab-Token": settings.datalab_token,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"DataLab 连接失败：{exc}") from exc
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=400 if response.status_code < 500 else 502,
+            detail=f"DataLab 拒绝查询：{response.text[:600]}",
+        )
+    return response.json()
 
 
 # ---------------------------------------------------------------------------

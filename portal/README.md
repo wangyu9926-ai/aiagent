@@ -133,12 +133,29 @@ Skills live with the portal (`portal/skills/`), not in each tenant home:
 - `catalog.json` lists id, display name, description, allowed roles/tenants and the Markdown entry file.
 - The chat sidebar shows the visible skills. Selecting one injects its Markdown into that turn's user
   context; the conversation stores only the skill IDs in message metadata.
-- The agent still uses its normal tenant tools; a skill that needs code execution or a database
-  connector only works in a tenant that has those tools.
+- The agent still uses its normal tenant tools. Real CSV/Excel computation goes through the
+  server-side DataLab worker, not tenant code execution.
 - Skills are versioned with the repo and audited like any other model input. Add a new skill by
   adding its Markdown file and catalog entry, then rebuild the portal.
 - Included examples: `data-analysis` and `web-research`. Database-backed analysis is a later
   connector/tool, not a prompt-only skill.
+
+### DataLab
+
+The `datalab` service runs pandas + DuckDB in an isolated container with a read-only uploads
+mount and no host ports. The tenant gets one tool, `datalab_query`, from `portal_datalab/`:
+
+```text
+copy portal_datalab/ to <HERMES_HOME>/plugins/datalab/
+hermes plugins enable datalab
+hermes tools enable --platform api_server datalab
+```
+
+The tool forwards only a conversation id, up to 10 file paths inside that conversation workspace,
+one SELECT/WITH query, and a row limit. The portal checks tenant token + workspace path, then calls
+DataLab with `DATALAB_TOKEN`. DataLab rejects writes, DDL, multiple statements, file-reading table
+functions and external database functions. Database connectors for later phases should live in
+DataLab and keep credentials server-side, never in the tenant prompt or browser.
 
 ## Local folder bridge
 
@@ -166,6 +183,8 @@ The directory handle is stored in IndexedDB per conversation. After a browser re
 | `PORTAL_MAX_BODY_BYTES` | 8 MiB | Maximum audit ingest request |
 | `PORTAL_LOGIN_MAX_ATTEMPTS` | 8 | Login throttle per IP + username |
 | `PORTAL_LOGIN_WINDOW_SECONDS` | 300 | Login throttle window |
+| `DATALAB_URL` | `http://datalab:8090` | Internal DataLab worker URL |
+| `DATALAB_TOKEN` | empty | Shared portal/worker token; required for analysis |
 
 ## CLI
 

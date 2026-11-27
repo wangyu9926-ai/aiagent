@@ -15,6 +15,8 @@ services:
       # Empty on first start => portal generates one into initial-admin.txt.
       PORTAL_ADMIN_PASSWORD: "${PORTAL_ADMIN_PASSWORD:-}"
       PORTAL_SECURE_COOKIES: "${PORTAL_SECURE_COOKIES:-0}"
+      DATALAB_URL: "http://datalab:8090"
+      DATALAB_TOKEN: "${DATALAB_TOKEN:-}"
     volumes:
       - hermes-portal-data:/data
       - ./portal/.e2e-data/uploads:/uploads
@@ -23,6 +25,23 @@ services:
       - hermes-public-net
     depends_on:
       - tenant-visitor
+      - datalab
+
+  datalab:
+    build:
+      context: ./datalab
+      dockerfile: Dockerfile
+    image: hermes-datalab:local
+    container_name: hermes-datalab
+    restart: unless-stopped
+    environment:
+      DATALAB_TOKEN: "${DATALAB_TOKEN:-}"
+      DATALAB_UPLOAD_ROOT: /uploads
+    volumes:
+      # Read-only: the worker never writes user files.
+      - ./portal/.e2e-data/uploads:/uploads:ro
+    networks:
+      - hermes-tenant-net
 
   # Opt-in HTTPS edge: `docker compose --profile tls up -d`.
   # Public domain: copy deploy/Caddyfile semantics and set PORTAL_DOMAIN.

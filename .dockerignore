@@ -156,3 +156,6 @@ portal/
 business_guard/
 portal_audit/
 portal/.e2e-data/
+
+datalab/
+portal_datalab/

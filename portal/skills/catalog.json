@@ -2,7 +2,7 @@
   {
     "id": "data-analysis",
     "name": "数据分析",
-    "description": "读取 CSV/Excel/文本数据做统计与结论；有代码执行时最完整，无代码执行时只适合小文件有限统计。",
+    "description": "通过服务端 DataLab 对 CSV/Excel 做统计、对比和异常检查，不需要业务租户安装代码环境。",
     "category": "数据",
     "roles": ["admin", "member"],
     "tenants": [],
