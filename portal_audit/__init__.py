@@ -20,6 +20,8 @@ import logging
 import os
 import socket
 import threading
+import time
+from pathlib import Path
 from typing import Any, Mapping
 
 from .client import AuditConfig, PortalAuditClient
@@ -29,6 +31,40 @@ logger = logging.getLogger("hermes.portal_audit")
 _CLIENT: PortalAuditClient | None = None
 _HEARTBEAT_STOP = threading.Event()
 _HEARTBEAT_STARTED = False
+_ASSET_CACHE: tuple[float, dict[str, Any]] = (0.0, {})
+
+
+def _asset_snapshot() -> dict[str, Any]:
+    """Cheap skill/memory inventory for the portal's accumulation view."""
+    global _ASSET_CACHE
+    now = time.time()
+    cached_at, cached = _ASSET_CACHE
+    if cached and now - cached_at < 60:
+        return cached
+    home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
+    try:
+        skill_files = list((home / "skills").rglob("SKILL.md"))
+    except OSError:
+        skill_files = []
+    entries: list[tuple[float, str]] = []
+    for path in skill_files:
+        try:
+            entries.append((path.stat().st_mtime, path.parent.relative_to(home / "skills").as_posix()))
+        except OSError:
+            continue
+    entries.sort(reverse=True)
+    recent = [name for _mtime, name in entries[:12] if _mtime > now - 7 * 86400]
+    try:
+        memory_count = sum(1 for path in (home / "memories").rglob("*") if path.is_file())
+    except OSError:
+        memory_count = 0
+    snapshot = {
+        "skill_count": len(skill_files),
+        "memory_count": memory_count,
+        "recent_skills": recent,
+    }
+    _ASSET_CACHE = (now, snapshot)
+    return snapshot
 
 PROVIDED_HOOKS = (
     "pre_llm_call",
@@ -112,7 +148,12 @@ def register(ctx, *, client: PortalAuditClient | None = None) -> None:
         def _heartbeat_loop() -> None:
             while not _HEARTBEAT_STOP.is_set():
                 try:
-                    client.heartbeat(version="0.1.0", pid=os.getpid(), hostname=socket.gethostname())
+                    client.heartbeat(
+                        version="0.1.0",
+                        pid=os.getpid(),
+                        hostname=socket.gethostname(),
+                        **_asset_snapshot(),
+                    )
                 except Exception:
                     logger.debug("portal audit heartbeat error", exc_info=True)
                 _HEARTBEAT_STOP.wait(30)

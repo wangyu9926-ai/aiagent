@@ -178,11 +178,28 @@ class PortalAuditClient:
     def fail_closed(self) -> bool:
         return bool(self.config.fail_closed)
 
-    def heartbeat(self, *, version: str = "0.1.0", pid: int | None = None, hostname: str | None = None) -> bool:
+    def heartbeat(
+        self,
+        *,
+        version: str = "0.1.0",
+        pid: int | None = None,
+        hostname: str | None = None,
+        skill_count: int = 0,
+        memory_count: int = 0,
+        recent_skills: list[str] | None = None,
+    ) -> bool:
         """Tell the portal this tenant's audit plugin is alive."""
         url = self.config.base_url.rstrip("/") + "/api/tenants/heartbeat"
         body = json.dumps(
-            {"version": version, "pid": pid, "hostname": hostname}, ensure_ascii=False
+            {
+                "version": version,
+                "pid": pid,
+                "hostname": hostname,
+                "skill_count": skill_count,
+                "memory_count": memory_count,
+                "recent_skills": recent_skills or [],
+            },
+            ensure_ascii=False,
         ).encode("utf-8")
         try:
             status, _data = self._transport(url, self.config.token, body, self.config.timeout_seconds)

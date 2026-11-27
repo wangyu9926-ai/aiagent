@@ -412,6 +412,31 @@ class ChatTests(unittest.TestCase):
         finally:
             alice.__exit__(None, None, None)
 
+    def test_heartbeat_reports_skill_and_memory_assets(self) -> None:
+        response = self.client.post(
+            "/api/tenants/heartbeat",
+            json={
+                "version": "test",
+                "skill_count": 7,
+                "memory_count": 3,
+                "recent_skills": ["productivity/new-skill", "software-development/audit"],
+            },
+            headers={"Authorization": f"Bearer {self.tenant_token}"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        assets = self.client.get("/api/assets")
+        self.assertEqual(assets.status_code, 200, assets.text)
+        tenant = next(
+            item for item in assets.json()["tenants"] if item["tenant_id"] == "team-chat"
+        )
+        self.assertEqual(tenant["skill_count"], 7)
+        self.assertEqual(tenant["memory_count"], 3)
+        self.assertEqual(
+            tenant["recent_skills"],
+            ["productivity/new-skill", "software-development/audit"],
+        )
+        self.assertIn("data-analysis", [item["id"] for item in assets.json()["server_skills"]])
+
     def test_datalab_proxy_validates_workspace_and_forwards_tenant_token(self) -> None:
         self.app.state.settings = dataclasses.replace(
             self.app.state.settings,

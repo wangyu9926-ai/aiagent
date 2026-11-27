@@ -451,6 +451,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             pid=int(pid) if isinstance(pid, int) else None,
             hostname=str(body.get("hostname") or "")[:200] or None,
         )
+        try:
+            skill_count = int(body.get("skill_count") or 0)
+        except (TypeError, ValueError):
+            skill_count = 0
+        try:
+            memory_count = int(body.get("memory_count") or 0)
+        except (TypeError, ValueError):
+            memory_count = 0
+        recent = body.get("recent_skills")
+        db.record_tenant_assets(
+            conn,
+            tenant["id"],
+            skill_count=skill_count,
+            memory_count=memory_count,
+            recent_skills=recent if isinstance(recent, list) else [],
+        )
         return {"ok": True}
 
     # ------------------------------------------------------------------

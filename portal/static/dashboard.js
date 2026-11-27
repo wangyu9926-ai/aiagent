@@ -113,7 +113,7 @@
     document.querySelectorAll(".nav-item").forEach((item) => {
       item.classList.toggle("active", item.dataset.tab === tab);
     });
-    ["live", "sessions", "projects", "tenants", "users", "approvals"].forEach((name) => {
+    ["live", "sessions", "projects", "tenants", "users", "approvals", "assets"].forEach((name) => {
       $(`tab-${name}`).hidden = name !== tab;
     });
     if (tab === "live") {
@@ -125,6 +125,7 @@
     if (tab === "tenants") loadTenants();
     if (tab === "users") loadUsers();
     if (tab === "approvals") loadApprovals();
+    if (tab === "assets") loadAssets();
   }
 
   // ---------------------------------------------------------------- data loading
@@ -945,6 +946,77 @@
     }
   }
 
+  // ---------------------------------------------------------------- skills & accumulation
+
+  async function loadAssets() {
+    try {
+      const data = await api("/api/assets");
+      renderServerSkills(data.server_skills || []);
+      renderTenantAssets(data.tenants || []);
+    } catch (error) {
+      showToast(error.message, "err");
+    }
+  }
+
+  function renderServerSkills(skills) {
+    const list = $("server-skill-list");
+    clear(list);
+    $("server-skill-count").textContent = `${skills.length} 个可用技能`;
+    if (!skills.length) {
+      list.append(node("div", "empty", "服务端技能库为空"));
+      return;
+    }
+    for (const skill of skills) {
+      const card = node("div", "approval-card");
+      const main = node("div", "approval-main");
+      const meta = node("div", "approval-meta");
+      meta.append(node("span", "badge", skill.category || "技能"));
+      meta.append(node("span", "", skill.id));
+      main.append(meta);
+      main.append(node("strong", "", skill.name));
+      if (skill.description) main.append(node("div", "small muted", skill.description));
+      const actions = node("div", "approval-actions");
+      const button = node("button", "btn btn-sm", "查看说明");
+      button.type = "button";
+      button.addEventListener("click", () => viewServerSkill(skill));
+      actions.append(button);
+      card.append(main, actions);
+      list.append(card);
+    }
+  }
+
+  async function viewServerSkill(skill) {
+    try {
+      const data = await api(`/api/skills/${encodeURIComponent(skill.id)}`);
+      $("server-skill-title").textContent = `${data.name} · ${data.id}`;
+      $("server-skill-body").textContent = data.content || "（空技能）";
+      $("server-skill-detail").hidden = false;
+      $("server-skill-detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (error) {
+      showToast(error.message, "err");
+    }
+  }
+
+  function renderTenantAssets(tenants) {
+    const tbody = $("assets-body");
+    clear(tbody);
+    $("assets-empty").hidden = tenants.length > 0;
+    for (const tenant of tenants) {
+      const row = node("tr");
+      const name = node("td");
+      name.append(node("strong", "", tenant.tenant_name || tenant.tenant_id));
+      name.append(node("div", "small muted mono", tenant.tenant_id));
+      row.append(name);
+      row.append(node("td", "", tenant.skill_count ?? 0));
+      row.append(node("td", "", tenant.memory_count ?? 0));
+      const recent = node("td", "small muted");
+      recent.textContent = (tenant.recent_skills || []).slice(0, 6).join("、") || "—";
+      row.append(recent);
+      row.append(node("td", "small muted", formatTime(tenant.last_seen)));
+      tbody.append(row);
+    }
+  }
+
   async function loadApprovals() {
     try {
       const data = await api("/api/approvals?status=pending");
@@ -1048,6 +1120,9 @@
     $("grant-form").addEventListener("submit", grantUser);
     $("grant-user").addEventListener("change", (event) => loadGrants(event.target.value));
     $("refresh-approvals").addEventListener("click", loadApprovals);
+    $("close-skill-detail").addEventListener("click", () => {
+      $("server-skill-detail").hidden = true;
+    });
 
     $("close-detail").addEventListener("click", () => {
       $("session-detail").hidden = true;

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import portal_audit
 
@@ -28,6 +32,22 @@ class FakeCtx:
 
 
 class HookTests(unittest.TestCase):
+    def test_asset_snapshot_counts_skills_and_memories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill = home / "skills" / "productivity" / "demo"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("# demo", encoding="utf-8")
+            memories = home / "memories"
+            memories.mkdir()
+            (memories / "note.md").write_text("note", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+                portal_audit._ASSET_CACHE = (0.0, {})
+                snapshot = portal_audit._asset_snapshot()
+        self.assertEqual(snapshot["skill_count"], 1)
+        self.assertEqual(snapshot["memory_count"], 1)
+        self.assertEqual(snapshot["recent_skills"], ["productivity/demo"])
+
     def test_registers_all_hooks(self) -> None:
         ctx = FakeCtx()
         portal_audit.register(ctx, client=FakeClient(ok=True))

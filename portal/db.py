@@ -163,6 +163,14 @@ CREATE TABLE IF NOT EXISTS tenant_heartbeats (
     hostname TEXT
 );
 
+CREATE TABLE IF NOT EXISTS tenant_assets (
+    tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    skill_count INTEGER NOT NULL DEFAULT 0,
+    memory_count INTEGER NOT NULL DEFAULT 0,
+    recent_skills TEXT,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS approvals (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -1163,6 +1171,57 @@ def record_heartbeat(
 def get_heartbeat(conn: sqlite3.Connection, tenant_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM tenant_heartbeats WHERE tenant_id = ?", (tenant_id,)).fetchone()
     return dict(row) if row is not None else None
+
+
+def record_tenant_assets(
+    conn: sqlite3.Connection,
+    tenant_id: str,
+    *,
+    skill_count: int = 0,
+    memory_count: int = 0,
+    recent_skills: Sequence[str] | None = None,
+) -> None:
+    recent = [str(item)[:160] for item in (recent_skills or []) if str(item).strip()][:20]
+    conn.execute(
+        "INSERT INTO tenant_assets (tenant_id, skill_count, memory_count, recent_skills, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT (tenant_id) DO UPDATE SET "
+        "skill_count = excluded.skill_count, memory_count = excluded.memory_count, "
+        "recent_skills = excluded.recent_skills, updated_at = excluded.updated_at",
+        (
+            tenant_id,
+            max(0, int(skill_count)),
+            max(0, int(memory_count)),
+            json.dumps(recent, ensure_ascii=False),
+            now(),
+        ),
+    )
+    conn.commit()
+
+
+def get_tenant_assets(conn: sqlite3.Connection, tenant_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM tenant_assets WHERE tenant_id = ?", (tenant_id,)).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    try:
+        result["recent_skills"] = json.loads(result.get("recent_skills") or "[]")
+    except (TypeError, ValueError):
+        result["recent_skills"] = []
+    return result
+
+
+def list_tenant_assets(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute("SELECT * FROM tenant_assets ORDER BY tenant_id").fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["recent_skills"] = json.loads(item.get("recent_skills") or "[]")
+        except (TypeError, ValueError):
+            item["recent_skills"] = []
+        result.append(item)
+    return result
 
 
 # ---------------------------------------------------------------------------

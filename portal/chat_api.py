@@ -601,6 +601,28 @@ def skills_list(user=Depends(current_user), conn=Depends(_get_conn)):
     return {"skills": _visible_skills(conn, user)}
 
 
+@router.get("/api/assets")
+def assets_overview(user=Depends(require_admin), conn=Depends(_get_conn)):
+    assets = {item["tenant_id"]: item for item in db.list_tenant_assets(conn)}
+    tenants: list[dict[str, Any]] = []
+    for tenant in db.list_tenants(conn):
+        asset = assets.get(tenant["id"], {})
+        heartbeat = db.get_heartbeat(conn, tenant["id"])
+        tenants.append(
+            {
+                "tenant_id": tenant["id"],
+                "tenant_name": tenant["name"],
+                "disabled": bool(tenant["disabled"]),
+                "last_seen": heartbeat["last_seen"] if heartbeat else None,
+                "skill_count": int(asset.get("skill_count") or 0),
+                "memory_count": int(asset.get("memory_count") or 0),
+                "recent_skills": asset.get("recent_skills") or [],
+                "updated_at": asset.get("updated_at"),
+            }
+        )
+    return {"server_skills": _visible_skills(conn, user), "tenants": tenants}
+
+
 @router.get("/api/skills/{skill_id}")
 def skill_detail(skill_id: str, user=Depends(current_user), conn=Depends(_get_conn)):
     visible = {item["id"]: item for item in _visible_skills(conn, user)}
