@@ -24,6 +24,8 @@
     localFolder: null,
     localBaseline: new Map(),
     localBusy: false,
+    skills: [],
+    selectedSkills: new Set(),
   };
 
   // Project onboarding opens /chat with a prefilled prompt. It is deliberately
@@ -413,10 +415,83 @@
       state.readonly = !!tenant && tenant.access_role === "viewer" && state.me.user.role !== "admin";
       setStatus(ready ? "就绪" : "未配置运行环境", ready ? "" : "danger");
       setComposerEnabled(ready && !state.readonly);
+      renderSkills();
       await loadLocalFolderState();
       watchActiveRun().catch(() => {});
     } catch (error) {
       showToast(error.message, "err");
+    }
+  }
+
+  // ---------------------------------------------------------------- server-side skills
+
+  async function loadSkills() {
+    try {
+      const data = await api("/api/skills");
+      state.skills = data.skills || [];
+      const available = new Set(state.skills.map((skill) => skill.id));
+      for (const skillId of [...state.selectedSkills]) {
+        if (!available.has(skillId)) state.selectedSkills.delete(skillId);
+      }
+      renderSkills();
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+
+  function renderSkills() {
+    const list = $("skill-list");
+    if (!list) return;
+    clear(list);
+    if (!state.skills.length) {
+      list.append(node("span", "small muted", state.readonly ? "只读账号不能使用技能" : "没有可用技能"));
+    } else {
+      for (const skill of state.skills) {
+        const button = node(
+          "button",
+          "skill-chip" + (state.selectedSkills.has(skill.id) ? " active" : ""),
+          skill.name
+        );
+        button.type = "button";
+        button.title = skill.description || skill.name;
+        button.disabled = state.readonly;
+        button.addEventListener("click", () => {
+          if (state.selectedSkills.has(skill.id)) state.selectedSkills.delete(skill.id);
+          else state.selectedSkills.add(skill.id);
+          renderSkills();
+        });
+        list.append(button);
+      }
+    }
+    const selected = state.skills.filter((skill) => state.selectedSkills.has(skill.id));
+    $("skill-selected-label").textContent = selected.length
+      ? selected.map((skill) => skill.name).join("、")
+      : "未选择";
+    renderSelectedSkills();
+  }
+
+  function renderSelectedSkills() {
+    const box = $("selected-skills");
+    if (!box) return;
+    clear(box);
+    const selected = state.skills.filter((skill) => state.selectedSkills.has(skill.id));
+    if (!selected.length) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    for (const skill of selected) {
+      const chip = node("span", "file-chip");
+      chip.append(node("span", "", `技能：${skill.name}`));
+      const remove = node("button", "file-remove", "×");
+      remove.type = "button";
+      remove.title = "取消使用";
+      remove.addEventListener("click", () => {
+        state.selectedSkills.delete(skill.id);
+        renderSkills();
+      });
+      chip.append(remove);
+      box.append(chip);
     }
   }
 
@@ -796,11 +871,13 @@
     }
   }
 
-  function messageNode(role, content, attachments) {
+  function messageNode(role, content, meta) {
     const wrapper = node("div", `message ${role}`);
-    const meta = node("div", "message-meta", role === "user" ? "你" : role === "assistant" ? "Agent" : role === "error" ? "错误" : "系统");
+    const metaRow = node("div", "message-meta", role === "user" ? "你" : role === "assistant" ? "Agent" : role === "error" ? "错误" : "系统");
     const body = node("div", "message-content", content);
-    wrapper.append(meta, body);
+    wrapper.append(metaRow, body);
+    const attachments = Array.isArray(meta) ? meta : meta?.attachments;
+    const skills = Array.isArray(meta) ? [] : meta?.skills;
     if (Array.isArray(attachments) && attachments.length) {
       const files = node("div", "message-files");
       for (const file of attachments) {
@@ -808,6 +885,14 @@
         chip.append(node("span", "", file.name || "file"));
         chip.append(node("span", "file-size", formatBytes(file.size)));
         files.append(chip);
+      }
+      wrapper.append(files);
+    }
+    if (Array.isArray(skills) && skills.length) {
+      const files = node("div", "message-files");
+      for (const skillId of skills) {
+        const skill = state.skills.find((item) => item.id === skillId);
+        files.append(node("span", "file-chip", `技能：${skill?.name || skillId}`));
       }
       wrapper.append(files);
     }
@@ -825,7 +910,7 @@
       return;
     }
     for (const message of messages) {
-      box.append(messageNode(message.role, message.content, message.meta?.attachments));
+      box.append(messageNode(message.role, message.content, message.meta || {}));
     }
     box.scrollTop = box.scrollHeight;
   }
@@ -1019,7 +1104,11 @@
           "X-Portal-CSRF": state.csrf,
         },
         credentials: "same-origin",
-        body: JSON.stringify({ content, attachment_ids: uploaded.map((item) => item.id) }),
+        body: JSON.stringify({
+          content,
+          attachment_ids: uploaded.map((item) => item.id),
+          skill_ids: [...state.selectedSkills],
+        }),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -1165,7 +1254,7 @@
     bind();
     renderLocalBridge();
     try {
-      await loadTenants();
+      await Promise.all([loadTenants(), loadSkills()]);
       prefillOnboardPrompt();
     } catch (error) {
       showError(error.message);

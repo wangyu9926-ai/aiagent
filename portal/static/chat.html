@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hermes Portal · 对话</title>
-  <link rel="stylesheet" href="/static/app.css?v=0.3.6">
+  <link rel="stylesheet" href="/static/app.css?v=0.3.7">
 </head>
 <body class="app-body">
   <header class="topbar">
@@ -32,6 +32,13 @@
         <span>租户</span>
         <select id="tenant-select"></select>
       </label>
+      <div class="skill-picker" id="skill-picker">
+        <div class="skill-picker-head">
+          <span>技能</span>
+          <span class="small muted" id="skill-selected-label">未选择</span>
+        </div>
+        <div class="skill-list" id="skill-list"></div>
+      </div>
       <div class="local-bridge" id="local-bridge">
         <div class="local-bridge-head">
           <span>本地文件夹</span>
@@ -62,6 +69,7 @@
       <div class="messages" id="messages"></div>
 
       <form class="chat-composer" id="composer">
+        <div class="composer-attachments" id="selected-skills" hidden></div>
         <div class="composer-attachments" id="pending-attachments" hidden></div>
         <div class="composer-row">
           <button class="btn btn-ghost attach-btn" id="attach-btn" type="button" title="添加文件" disabled>📎</button>
@@ -75,6 +83,6 @@
   </main>
 
   <div class="toast" id="toast" role="status" hidden></div>
-  <script src="/static/chat.js?v=0.3.6"></script>
+  <script src="/static/chat.js?v=0.3.7"></script>
 </body>
 </html>

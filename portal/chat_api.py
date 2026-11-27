@@ -49,6 +49,54 @@ LOCAL_SKIP_FILES = {
     "id_rsa", "id_ed25519", "credentials.json", "auth.json",
 }
 LOCAL_SKIP_SUFFIXES = (".pem", ".key", ".pfx", ".p12")
+SKILLS_DIR = Path(__file__).resolve().parent / "skills"
+
+
+def _skill_catalog() -> list[dict[str, Any]]:
+    try:
+        raw = json.loads((SKILLS_DIR / "catalog.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("skill catalog unavailable: %s", exc)
+        return []
+    return [item for item in raw if isinstance(item, dict) and item.get("id") and item.get("entry")]
+
+
+def _visible_skills(conn, user) -> list[dict[str, Any]]:
+    visible: list[dict[str, Any]] = []
+    for skill in _skill_catalog():
+        roles = skill.get("roles") or []
+        if roles and user["role"] not in roles:
+            continue
+        tenant_ids = skill.get("tenants") or []
+        if tenant_ids and user["role"] != "admin":
+            if not any(db.user_can_access(conn, user["user_id"], tenant_id) for tenant_id in tenant_ids):
+                continue
+        visible.append(
+            {
+                "id": skill["id"],
+                "name": skill.get("name") or skill["id"],
+                "description": skill.get("description") or "",
+                "category": skill.get("category") or "",
+            }
+        )
+    return visible
+
+
+def _skill_content(skill: dict[str, Any]) -> str:
+    entry = PurePosixPath(str(skill.get("entry") or ""))
+    if entry.is_absolute() or ".." in entry.parts:
+        raise HTTPException(status_code=500, detail="技能文件路径不合法")
+    path = (SKILLS_DIR / Path(*entry.parts)).resolve()
+    if not path.is_relative_to(SKILLS_DIR.resolve()) or not path.is_file():
+        raise HTTPException(status_code=404, detail="技能内容不存在")
+    return path.read_text(encoding="utf-8")[:50_000]
+
+
+def _skill_content_for_id(skill_id: str) -> str:
+    for item in _skill_catalog():
+        if item.get("id") == skill_id:
+            return _skill_content(item)
+    raise HTTPException(status_code=404, detail="技能不存在")
 
 logger = logging.getLogger("portal.chat")
 _background_tasks: set[asyncio.Task] = set()
@@ -270,6 +318,7 @@ class LocalFolderIn(BaseModel):
 class ChatIn(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
     attachment_ids: list[str] = Field(default_factory=list, max_length=5)
+    skill_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class ApprovalIn(BaseModel):
@@ -527,6 +576,28 @@ def decide_approval(
     if updated is None:
         raise HTTPException(status_code=409, detail="审批状态已变化，请刷新")
     return {"ok": True, "approval": updated}
+
+
+# ---------------------------------------------------------------------------
+# Server-side skill library
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/skills")
+def skills_list(user=Depends(current_user), conn=Depends(_get_conn)):
+    return {"skills": _visible_skills(conn, user)}
+
+
+@router.get("/api/skills/{skill_id}")
+def skill_detail(skill_id: str, user=Depends(current_user), conn=Depends(_get_conn)):
+    visible = {item["id"]: item for item in _visible_skills(conn, user)}
+    skill = visible.get(skill_id)
+    if skill is None:
+        raise HTTPException(status_code=404, detail="技能不存在或没有权限")
+    for item in _skill_catalog():
+        if item.get("id") == skill_id:
+            return {**skill, "content": _skill_content(item)}
+    raise HTTPException(status_code=404, detail="技能不存在")
 
 
 # ---------------------------------------------------------------------------
@@ -1226,12 +1297,34 @@ async def send_chat_message(
             + "可以直接读取和修改这个目录里的文件；用户会在浏览器点“同步回本地”把改动写回自己的电脑。"
             + "优先只改这个目录，不要访问其他本地路径。]"
         )
+    skill_note = ""
+    selected_skill_ids: list[str] = []
+    if body.skill_ids:
+        visible = {item["id"]: item for item in _visible_skills(conn, user)}
+        blocks: list[str] = []
+        for skill_id in dict.fromkeys(body.skill_ids):
+            skill = visible.get(skill_id)
+            if skill is None:
+                raise HTTPException(status_code=404, detail=f"技能不存在或没有权限：{skill_id}")
+            selected_skill_ids.append(skill_id)
+            blocks.append(f"### 技能：{skill['name']}\n{_skill_content_for_id(skill_id)}")
+        skill_note = (
+            chr(10) * 2
+            + "[本轮使用服务端技能，按下列说明执行；技能说明只对本轮生效]"
+            + chr(10)
+            + chr(10).join(blocks)
+        )
+    meta: dict[str, Any] = {}
+    if attachments:
+        meta["attachments"] = attachments
+    if selected_skill_ids:
+        meta["skills"] = selected_skill_ids
     db.add_message(
         conn,
         conversation_id,
         "user",
         content,
-        meta={"attachments": attachments} if attachments else None,
+        meta=meta or None,
     )
     history_rows = db.list_messages(conn, conversation_id, limit=80)
     payload_messages: list[dict[str, str]] = []
@@ -1247,7 +1340,7 @@ async def send_chat_message(
     payload_messages.reverse()
     if not payload_messages:
         payload_messages = [{"role": "user", "content": content}]
-    extra_note = attachment_note + local_note
+    extra_note = attachment_note + local_note + skill_note
     if extra_note and payload_messages and payload_messages[-1]["role"] == "user":
         payload_messages[-1]["content"] = content + extra_note
     model = runtime.get("model") or "hermes-agent"

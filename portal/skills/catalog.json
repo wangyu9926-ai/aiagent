@@ -1,0 +1,20 @@
+[
+  {
+    "id": "data-analysis",
+    "name": "数据分析",
+    "description": "读取 CSV/Excel/文本数据，做统计、对比、异常检查和结论汇总。",
+    "category": "数据",
+    "roles": ["admin", "member"],
+    "tenants": [],
+    "entry": "data-analysis.md"
+  },
+  {
+    "id": "web-research",
+    "name": "资料调研",
+    "description": "用网页搜索/浏览器收集资料，交叉核对来源并输出带出处的结论。",
+    "category": "研究",
+    "roles": ["admin", "member"],
+    "tenants": [],
+    "entry": "web-research.md"
+  }
+]

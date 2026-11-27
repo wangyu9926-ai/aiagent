@@ -371,6 +371,45 @@ class ChatTests(unittest.TestCase):
         finally:
             bob.__exit__(None, None, None)
 
+    def test_skill_catalog_and_turn_injection(self) -> None:
+        alice, csrf = self.user_client("alice", "alice-pass-123")
+        try:
+            listing = alice.get("/api/skills")
+            self.assertEqual(listing.status_code, 200, listing.text)
+            ids = [item["id"] for item in listing.json()["skills"]]
+            self.assertIn("data-analysis", ids)
+            detail = alice.get("/api/skills/data-analysis")
+            self.assertEqual(detail.status_code, 200, detail.text)
+            self.assertIn("数据分析技能", detail.json()["content"])
+
+            seen = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                seen["body"] = json.loads(request.content)
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=_sse({"choices": [{"delta": {"content": "已按技能执行"}}]}),
+                )
+
+            self.app.state.chat_transport = httpx.MockTransport(handler)
+            conversation = self.make_conversation(alice, csrf)
+            response = alice.post(
+                f"/api/chat/conversations/{conversation['id']}/messages",
+                json={"content": "分析这份数据", "skill_ids": ["data-analysis"]},
+                headers={"X-Portal-CSRF": csrf},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            sent = seen["body"]["messages"][-1]["content"]
+            self.assertIn("本轮使用服务端技能", sent)
+            self.assertIn("数据分析技能", sent)
+            messages = alice.get(
+                f"/api/chat/conversations/{conversation['id']}/messages"
+            ).json()["messages"]
+            self.assertEqual(messages[0]["meta"]["skills"], ["data-analysis"])
+        finally:
+            alice.__exit__(None, None, None)
+
     def test_local_folder_bridge_round_trip(self) -> None:
         alice, csrf = self.user_client("alice", "alice-pass-123")
         try:

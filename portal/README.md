@@ -126,6 +126,20 @@ Every tenant's `portal-audit` plugin posts `/api/tenants/heartbeat` on load and 
 
 The business tenant also loads `business-guard` as a `pre_tool_call` hook. It blocks file access to Hermes config, credentials and audit state, and blocks browser URLs pointing at `file://` or internal services (`portal`, `egress`, loopback). It does not remove regular file tools for `/uploads` or normal project files. Writes are limited to `/uploads/business` plus the tenant's own `skills/` and `memories/` directories.
 
+## Server-side skill library
+
+Skills live with the portal (`portal/skills/`), not in each tenant home:
+
+- `catalog.json` lists id, display name, description, allowed roles/tenants and the Markdown entry file.
+- The chat sidebar shows the visible skills. Selecting one injects its Markdown into that turn's user
+  context; the conversation stores only the skill IDs in message metadata.
+- The agent still uses its normal tenant tools; a skill that needs code execution or a database
+  connector only works in a tenant that has those tools.
+- Skills are versioned with the repo and audited like any other model input. Add a new skill by
+  adding its Markdown file and catalog entry, then rebuild the portal.
+- Included examples: `data-analysis` and `web-research`. Database-backed analysis is a later
+  connector/tool, not a prompt-only skill.
+
 ## Local folder bridge
 
 A member can authorize one local directory per conversation from the chat sidebar (`连接文件夹`). Chromium browsers only (Edge/Chrome); the portal must be served over HTTPS or localhost because the File System Access API needs a secure context.
