@@ -412,6 +412,85 @@ class ChatTests(unittest.TestCase):
         finally:
             alice.__exit__(None, None, None)
 
+    def test_private_and_team_memory_scopes(self) -> None:
+        alice, alice_csrf = self.user_client("alice", "alice-pass-123")
+        self.create_user("bob", "bob-pass-123", "member", "team-chat")
+        bob, bob_csrf = self.user_client("bob", "bob-pass-123")
+        try:
+            alice_conversation = self.make_conversation(alice, alice_csrf)
+            bob_conversation = self.make_conversation(bob, bob_csrf)
+            private = alice.post(
+                f"/api/chat/conversations/{alice_conversation['id']}/memories",
+                json={"content": "Alice 的私有口径", "scope": "private"},
+                headers={"X-Portal-CSRF": alice_csrf},
+            )
+            self.assertEqual(private.status_code, 200, private.text)
+            alice_memories = alice.get(
+                f"/api/chat/conversations/{alice_conversation['id']}/memories"
+            ).json()["memories"]
+            self.assertEqual([item["content"] for item in alice_memories], ["Alice 的私有口径"])
+            bob_memories = bob.get(
+                f"/api/chat/conversations/{bob_conversation['id']}/memories"
+            ).json()["memories"]
+            self.assertEqual(bob_memories, [])
+            denied_team = bob.post(
+                f"/api/chat/conversations/{bob_conversation['id']}/memories",
+                json={"content": "Bob 想写团队记忆", "scope": "team"},
+                headers={"X-Portal-CSRF": bob_csrf},
+            )
+            self.assertEqual(denied_team.status_code, 403)
+            admin_conversation = self.make_conversation(self.client, self.admin_csrf)
+            team = self.client.post(
+                f"/api/chat/conversations/{admin_conversation['id']}/memories",
+                json={"content": "团队统一按财务口径", "scope": "team"},
+                headers={"X-Portal-CSRF": self.admin_csrf},
+            )
+            self.assertEqual(team.status_code, 200, team.text)
+            visible = bob.get(
+                f"/api/chat/conversations/{bob_conversation['id']}/memories"
+            ).json()["memories"]
+            self.assertEqual([item["content"] for item in visible], ["团队统一按财务口径"])
+        finally:
+            alice.__exit__(None, None, None)
+            bob.__exit__(None, None, None)
+
+    def test_chat_injects_private_and_team_memories(self) -> None:
+        alice, csrf = self.user_client("alice", "alice-pass-123")
+        try:
+            conversation = self.make_conversation(alice, csrf)
+            alice.post(
+                f"/api/chat/conversations/{conversation['id']}/memories",
+                json={"content": "Alice 私有备注", "scope": "private"},
+                headers={"X-Portal-CSRF": csrf},
+            )
+            admin_conversation = self.make_conversation(self.client, self.admin_csrf)
+            self.client.post(
+                f"/api/chat/conversations/{admin_conversation['id']}/memories",
+                json={"content": "团队共享口径", "scope": "team"},
+                headers={"X-Portal-CSRF": self.admin_csrf},
+            )
+            seen = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                seen["content"] = json.loads(request.content)["messages"][-1]["content"]
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=_sse({"choices": [{"delta": {"content": "ok"}}]}),
+                )
+
+            self.app.state.chat_transport = httpx.MockTransport(handler)
+            response = alice.post(
+                f"/api/chat/conversations/{conversation['id']}/messages",
+                json={"content": "你好"},
+                headers={"X-Portal-CSRF": csrf},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertIn("Alice 私有备注", seen["content"])
+            self.assertIn("团队共享口径", seen["content"])
+        finally:
+            alice.__exit__(None, None, None)
+
     def test_heartbeat_reports_skill_and_memory_assets(self) -> None:
         response = self.client.post(
             "/api/tenants/heartbeat",

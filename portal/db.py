@@ -163,6 +163,20 @@ CREATE TABLE IF NOT EXISTS tenant_heartbeats (
     hostname TEXT
 );
 
+CREATE TABLE IF NOT EXISTS memories (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    scope TEXT NOT NULL CHECK (scope IN ('private', 'team')),
+    content TEXT NOT NULL,
+    tags TEXT,
+    created_by INTEGER,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_tenant_scope ON memories (tenant_id, scope, updated_at);
+
 CREATE TABLE IF NOT EXISTS tenant_assets (
     tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
     skill_count INTEGER NOT NULL DEFAULT 0,
@@ -1222,6 +1236,103 @@ def list_tenant_assets(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             item["recent_skills"] = []
         result.append(item)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Scoped memories: private per portal user, plus tenant-wide team facts
+# ---------------------------------------------------------------------------
+
+
+def add_memory(
+    conn: sqlite3.Connection,
+    tenant_id: str,
+    *,
+    scope: str,
+    content: str,
+    user_id: int | None = None,
+    created_by: int | None = None,
+    tags: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    if scope not in {"private", "team"}:
+        raise ValueError("scope 必须是 private 或 team")
+    text = str(content or "").strip()
+    if not text:
+        raise ValueError("记忆内容不能为空")
+    if len(text) > 4000:
+        raise ValueError("单条记忆最多 4000 字")
+    if scope == "private" and user_id is None:
+        raise ValueError("私有记忆必须有 user_id")
+    memory_id = uuid.uuid4().hex
+    created = now()
+    conn.execute(
+        "INSERT INTO memories "
+        "(id, tenant_id, user_id, scope, content, tags, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            memory_id,
+            tenant_id,
+            user_id if scope == "private" else None,
+            scope,
+            text,
+            json.dumps(list(tags or []), ensure_ascii=False) if tags else None,
+            created_by,
+            created,
+            created,
+        ),
+    )
+    conn.commit()
+    return get_memory(conn, memory_id) or {}
+
+
+def get_memory(conn: sqlite3.Connection, memory_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    try:
+        result["tags"] = json.loads(result.get("tags") or "[]")
+    except (TypeError, ValueError):
+        result["tags"] = []
+    return result
+
+
+def list_memories(
+    conn: sqlite3.Connection,
+    tenant_id: str,
+    user_id: int,
+    *,
+    include_team: bool = True,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(200, int(limit)))
+    if include_team:
+        rows = conn.execute(
+            "SELECT * FROM memories WHERE tenant_id = ? AND "
+            "(scope = 'team' OR (scope = 'private' AND user_id = ?)) "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (tenant_id, user_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM memories WHERE tenant_id = ? AND scope = 'private' AND user_id = ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (tenant_id, user_id, limit),
+        ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["tags"] = json.loads(item.get("tags") or "[]")
+        except (TypeError, ValueError):
+            item["tags"] = []
+        result.append(item)
+    return result
+
+
+def delete_memory(conn: sqlite3.Connection, memory_id: str) -> bool:
+    cursor = conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+    conn.commit()
+    return cursor.rowcount > 0
 
 
 # ---------------------------------------------------------------------------

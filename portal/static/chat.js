@@ -26,6 +26,9 @@
     localBusy: false,
     skills: [],
     selectedSkills: new Set(),
+    memories: [],
+    canManageTeam: false,
+    memoryScope: "private",
   };
 
   // Project onboarding opens /chat with a prefilled prompt. It is deliberately
@@ -365,7 +368,11 @@
     state.localDirHandle = null;
     state.localNeedsPermission = false;
     state.localBaseline = new Map();
+    state.memories = [];
+    state.canManageTeam = false;
+    state.memoryScope = "private";
     renderLocalBridge();
+    renderMemories();
     state.tenantId = tenantId;
     const tenant = currentTenant();
     state.readonly = !!tenant && tenant.access_role === "viewer" && state.me.user.role !== "admin";
@@ -393,7 +400,11 @@
     state.localDirHandle = null;
     state.localNeedsPermission = false;
     state.localBaseline = new Map();
+    state.memories = [];
+    state.canManageTeam = false;
+    state.memoryScope = "private";
     renderLocalBridge();
+    renderMemories();
     renderConversations();
     renderMessages([]);
     $("chat-title").textContent = "新会话";
@@ -461,6 +472,7 @@
       setStatus(ready ? "就绪" : "未配置运行环境", ready ? "" : "danger");
       setComposerEnabled(ready && !state.readonly);
       renderSkills();
+      await loadMemories();
       await loadLocalFolderState();
       watchActiveRun().catch(() => {});
     } catch (error) {
@@ -537,6 +549,134 @@
       });
       chip.append(remove);
       box.append(chip);
+    }
+  }
+
+  // ---------------------------------------------------------------- scoped memories
+
+  async function loadMemories() {
+    if (!state.conversationId) {
+      state.memories = [];
+      state.canManageTeam = false;
+      renderMemories();
+      return;
+    }
+    try {
+      const data = await api(
+        `/api/chat/conversations/${encodeURIComponent(state.conversationId)}/memories`
+      );
+      state.memories = data.memories || [];
+      state.canManageTeam = !!data.can_manage_team;
+      if (!state.canManageTeam && state.memoryScope === "team") state.memoryScope = "private";
+      renderMemories();
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+
+  function renderMemories() {
+    const badge = $("memory-badge");
+    const hint = $("memory-hint");
+    if (!badge || !hint) return;
+    const privateCount = state.memories.filter((item) => item.scope === "private").length;
+    const teamCount = state.memories.filter((item) => item.scope === "team").length;
+    badge.textContent = String(state.memories.length);
+    hint.textContent = state.conversationId
+      ? `私有 ${privateCount} 条 · 团队 ${teamCount} 条`
+      : "私有记忆只对你可见；团队记忆全组可见。";
+    renderMemoryList();
+  }
+
+  function renderMemoryList() {
+    const list = $("memory-list");
+    if (!list) return;
+    clear(list);
+    if (!state.memories.length) {
+      list.append(node("div", "empty", "还没有记忆。可以在这里添加，也可以让 Agent 记住。"));
+      return;
+    }
+    for (const item of state.memories) {
+      const card = node("div", "memory-item");
+      const main = node("div", "memory-item-main");
+      const meta = node("div", "memory-item-meta", `${item.scope === "team" ? "团队" : "私有"} · ${formatTime(item.updated_at)}`);
+      main.append(meta, node("div", "memory-item-content", item.content));
+      card.append(main);
+      const canDelete = item.scope === "private" || state.canManageTeam;
+      if (canDelete) {
+        const remove = node("button", "memory-item-remove", "×");
+        remove.type = "button";
+        remove.title = "删除记忆";
+        remove.addEventListener("click", () => deleteMemory(item.id));
+        card.append(remove);
+      }
+      list.append(card);
+    }
+  }
+
+  function setMemoryScope(scope) {
+    if (scope === "team" && !state.canManageTeam) {
+      showToast("团队共享记忆只能由管理员维护", "err");
+      return;
+    }
+    state.memoryScope = scope;
+    document.querySelectorAll(".scope-option").forEach((button) => {
+      button.classList.toggle("active", button.dataset.scope === scope);
+    });
+    $("memory-modal-hint").textContent =
+      scope === "team"
+        ? "团队记忆对整个租户可见，请只写 SOP、项目背景、公共口径。"
+        : "私有记忆只对当前用户可见。";
+  }
+
+  function openMemoryModal() {
+    if (!state.conversationId) {
+      showToast("先选择或新建一个会话", "err");
+      return;
+    }
+    setMemoryScope(state.memoryScope);
+    $("memory-modal").hidden = false;
+    $("memory-input").focus();
+  }
+
+  function closeMemoryModal() {
+    $("memory-modal").hidden = true;
+  }
+
+  async function saveMemory() {
+    const input = $("memory-input");
+    const content = input.value.trim();
+    if (!content) {
+      showToast("先写一条记忆", "err");
+      return;
+    }
+    if (state.memoryScope === "team" && !state.canManageTeam) {
+      showToast("团队共享记忆只能由管理员添加", "err");
+      return;
+    }
+    try {
+      await api(`/api/chat/conversations/${encodeURIComponent(state.conversationId)}/memories`, {
+        method: "POST",
+        body: { content, scope: state.memoryScope },
+      });
+      input.value = "";
+      showToast("记忆已保存");
+      await loadMemories();
+    } catch (error) {
+      showToast(error.message, "err");
+    }
+  }
+
+  async function deleteMemory(memoryId) {
+    if (!window.confirm("删除这条记忆？")) return;
+    try {
+      await api(
+        `/api/chat/conversations/${encodeURIComponent(state.conversationId)}/memories/${encodeURIComponent(memoryId)}`,
+        { method: "DELETE" }
+      );
+      showToast("记忆已删除");
+      await loadMemories();
+    } catch (error) {
+      showToast(error.message, "err");
     }
   }
 
@@ -1250,10 +1390,23 @@
     $("tenant-menu").addEventListener("click", (event) => event.stopPropagation());
     document.addEventListener("click", closeTenantMenu);
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeTenantMenu();
+      if (event.key !== "Escape") return;
+      closeTenantMenu();
+      if (!$("memory-modal").hidden) closeMemoryModal();
     });
     $("new-conversation").addEventListener("click", () => {
       createConversation().catch((error) => showToast(error.message, "err"));
+    });
+    $("memory-manage").addEventListener("click", openMemoryModal);
+    $("memory-modal-close").addEventListener("click", closeMemoryModal);
+    $("memory-modal").addEventListener("click", (event) => {
+      if (event.target === $("memory-modal")) closeMemoryModal();
+    });
+    $("memory-add").addEventListener("click", () => {
+      saveMemory().catch((error) => showToast(error.message, "err"));
+    });
+    document.querySelectorAll(".scope-option").forEach((button) => {
+      button.addEventListener("click", () => setMemoryScope(button.dataset.scope));
     });
     $("local-connect").addEventListener("click", () => {
       connectLocalFolder().catch((error) => showToast(error.message, "err"));

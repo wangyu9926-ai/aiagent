@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hermes Portal · 对话</title>
   <script src="/static/theme.js?v=0.1.1"></script>
-  <link rel="stylesheet" href="/static/app.css?v=0.4.2">
+  <link rel="stylesheet" href="/static/app.css?v=0.4.3">
 </head>
 <body class="app-body">
   <header class="topbar">
@@ -45,6 +45,16 @@
           <span class="small muted" id="skill-selected-label">未选择</span>
         </div>
         <div class="skill-list" id="skill-list"></div>
+      </div>
+      <div class="memory-panel" id="memory-panel">
+        <div class="local-bridge-head">
+          <span>记忆</span>
+          <span class="badge" id="memory-badge">0</span>
+        </div>
+        <div class="small muted" id="memory-hint">私有记忆只对你可见；团队记忆全组可见。</div>
+        <div class="local-bridge-actions">
+          <button class="btn btn-sm" id="memory-manage" type="button">管理记忆</button>
+        </div>
       </div>
       <div class="local-bridge" id="local-bridge">
         <div class="local-bridge-head">
@@ -89,7 +99,31 @@
     </section>
   </main>
 
+  <div class="modal" id="memory-modal" role="dialog" aria-modal="true" aria-labelledby="memory-modal-title" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="memory-modal-title">记忆</h2>
+        <button class="btn btn-sm" id="memory-modal-close" type="button">关闭</button>
+      </div>
+      <div class="modal-body memory-modal-body">
+        <div class="memory-list" id="memory-list"></div>
+        <label class="field memory-input-field">
+          <span>新增记忆</span>
+          <textarea id="memory-input" rows="3" maxlength="4000" placeholder="例如：本部门的销售额以财务确认口径为准"></textarea>
+        </label>
+        <div class="memory-compose">
+          <div class="memory-scope-toggle" role="group" aria-label="记忆范围">
+            <button class="scope-option active" data-scope="private" type="button">私有</button>
+            <button class="scope-option" data-scope="team" type="button">团队</button>
+          </div>
+          <button class="btn btn-primary btn-sm" id="memory-add" type="button">保存记忆</button>
+        </div>
+        <p class="small muted" id="memory-modal-hint">私有记忆只对当前用户可见；团队记忆全租户可见。</p>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast" role="status" hidden></div>
-  <script src="/static/chat.js?v=0.4.2"></script>
+  <script src="/static/chat.js?v=0.4.3"></script>
 </body>
 </html>

@@ -1,0 +1,7 @@
+name: portal-memory
+version: 0.1.0
+description: "Portal-scoped memory: private per portal user, team-wide per tenant. Replaces tenant-global native memory in shared business tenants."
+author: "Hermes Portal"
+provides_tools:
+  - memory_list
+  - memory_add

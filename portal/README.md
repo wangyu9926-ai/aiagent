@@ -137,8 +137,29 @@ Skills live with the portal (`portal/skills/`), not in each tenant home:
   server-side DataLab worker, not tenant code execution.
 - Skills are versioned with the repo and audited like any other model input. Add a new skill by
   adding its Markdown file and catalog entry, then rebuild the portal.
-- Included examples: `data-analysis` and `web-research`. Database-backed analysis is a later
-  connector/tool, not a prompt-only skill.
+- Included examples: `data-analysis`, `database-analysis` and `web-research`. Skills are
+  role/tenant-scoped; per-user skill overrides are a later layer.
+
+### Scoped memories
+
+Shared business tenants must not use Hermes's tenant-global native memory. The
+`portal_memory/` plugin replaces it with two portal scopes:
+
+- `private`: keyed by the conversation owner; only that portal user sees it.
+- `team`: keyed by tenant; every member sees it, but only an admin can add/delete it.
+
+Install it in the shared tenant and turn off the native memory toolset:
+
+```text
+copy portal_memory/ to <HERMES_HOME>/plugins/portal-memory/
+hermes plugins enable portal-memory
+hermes tools enable --platform api_server portal_memory
+hermes tools disable --platform api_server memory
+```
+
+The chat sidebar has a memory manager; private and team memories are injected into the
+turn context with clear labels. The agent gets `memory_list` / `memory_add` tools.
+This does not yet split learned skills per user; skills remain role/tenant-scoped.
 
 ### DataLab
 

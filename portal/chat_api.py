@@ -344,6 +344,17 @@ class DatalabDbQueryIn(BaseModel):
     limit: int = Field(default=200, ge=1, le=2000)
 
 
+class MemoryIn(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    scope: Literal["private", "team"] = "private"
+
+
+class AgentMemoryIn(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=64)
+    content: str = Field(min_length=1, max_length=4000)
+    scope: Literal["private", "team"] = "private"
+
+
 class ChatIn(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
     attachment_ids: list[str] = Field(default_factory=list, max_length=5)
@@ -649,6 +660,125 @@ def skill_detail(skill_id: str, user=Depends(current_user), conn=Depends(_get_co
         if item.get("id") == skill_id:
             return {**skill, "content": _skill_content(item)}
     raise HTTPException(status_code=404, detail="技能不存在")
+
+
+# ---------------------------------------------------------------------------
+# Scoped memories: private per portal user, team-wide per tenant
+# ---------------------------------------------------------------------------
+
+
+def _memory_public(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item["id"],
+        "scope": item["scope"],
+        "content": item["content"],
+        "tags": item.get("tags") or [],
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+    }
+
+
+@router.get("/api/chat/conversations/{conversation_id}/memories")
+def list_chat_memories(
+    conversation_id: str,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    conversation = _conversation_for(conn, user, conversation_id)
+    if conversation["user_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="只能管理自己会话的记忆")
+    items = db.list_memories(conn, conversation["tenant_id"], conversation["user_id"], include_team=True)
+    return {
+        "memories": [_memory_public(item) for item in items],
+        "can_manage_team": user["role"] == "admin",
+    }
+
+
+@router.post("/api/chat/conversations/{conversation_id}/memories")
+def add_chat_memory(
+    conversation_id: str,
+    body: MemoryIn,
+    request: Request,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    check_csrf(request, user)
+    conversation = _conversation_for(conn, user, conversation_id)
+    if conversation["user_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="只能管理自己会话的记忆")
+    if body.scope == "team" and user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="团队共享记忆只能由管理员添加")
+    try:
+        item = db.add_memory(
+            conn,
+            conversation["tenant_id"],
+            scope=body.scope,
+            content=body.content,
+            user_id=conversation["user_id"] if body.scope == "private" else None,
+            created_by=user["user_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"memory": _memory_public(item)}
+
+
+@router.delete("/api/chat/conversations/{conversation_id}/memories/{memory_id}")
+def delete_chat_memory(
+    conversation_id: str,
+    memory_id: str,
+    request: Request,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    check_csrf(request, user)
+    conversation = _conversation_for(conn, user, conversation_id)
+    if conversation["user_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="只能管理自己会话的记忆")
+    item = db.get_memory(conn, memory_id)
+    if item is None or item["tenant_id"] != conversation["tenant_id"]:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    if item["scope"] == "team" and user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="团队共享记忆只能由管理员删除")
+    if item["scope"] == "private" and item["user_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="不能删除他人的私有记忆")
+    db.delete_memory(conn, memory_id)
+    return {"ok": True}
+
+
+@router.get("/api/agent/memories")
+def agent_list_memories(
+    conversation_id: str,
+    request: Request,
+    conn=Depends(_get_conn),
+):
+    _tenant, conversation, _role = _tenant_role_context(request, conn, conversation_id)
+    items = db.list_memories(
+        conn, conversation["tenant_id"], conversation["user_id"], include_team=True
+    )
+    return {"memories": [_memory_public(item) for item in items]}
+
+
+@router.post("/api/agent/memories")
+def agent_add_memory(
+    body: AgentMemoryIn,
+    request: Request,
+    conn=Depends(_get_conn),
+):
+    _tenant, conversation, role = _tenant_role_context(request, conn, body.conversation_id)
+    if body.scope == "team" and role != "admin":
+        raise HTTPException(status_code=403, detail="团队共享记忆只能由管理员添加")
+    try:
+        item = db.add_memory(
+            conn,
+            conversation["tenant_id"],
+            scope=body.scope,
+            content=body.content,
+            user_id=conversation["user_id"] if body.scope == "private" else None,
+            created_by=conversation["user_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"memory": _memory_public(item)}
 
 
 # ---------------------------------------------------------------------------
@@ -1571,6 +1701,21 @@ async def send_chat_message(
             + chr(10)
             + chr(10).join(blocks)
         )
+    memory_rows = db.list_memories(
+        conn, conversation["tenant_id"], conversation["user_id"], include_team=True, limit=30
+    )
+    private_memories = [item for item in memory_rows if item["scope"] == "private"][:10]
+    team_memories = [item for item in memory_rows if item["scope"] == "team"][:10]
+
+    def memory_block(title: str, items: list[dict[str, Any]]) -> str:
+        if not items:
+            return ""
+        lines = [f"[{title}]"] + [f"- {str(item['content'])[:600]}" for item in items]
+        return chr(10) * 2 + chr(10).join(lines)
+
+    memory_note = memory_block("用户私有记忆", private_memories) + memory_block(
+        "团队共享记忆", team_memories
+    )
     meta: dict[str, Any] = {}
     if attachments:
         meta["attachments"] = attachments
@@ -1597,7 +1742,7 @@ async def send_chat_message(
     payload_messages.reverse()
     if not payload_messages:
         payload_messages = [{"role": "user", "content": content}]
-    extra_note = attachment_note + local_note + skill_note
+    extra_note = attachment_note + local_note + skill_note + memory_note
     if extra_note and payload_messages and payload_messages[-1]["role"] == "user":
         payload_messages[-1]["content"] = content + extra_note
     model = runtime.get("model") or "hermes-agent"
