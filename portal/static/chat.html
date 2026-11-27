@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hermes Portal · 对话</title>
-  <link rel="stylesheet" href="/static/app.css?v=0.3.7">
+  <script src="/static/theme.js?v=0.1.1"></script>
+  <link rel="stylesheet" href="/static/app.css?v=0.4.1">
 </head>
 <body class="app-body">
   <header class="topbar">
@@ -28,10 +29,16 @@
         <h2>对话</h2>
         <button class="btn btn-sm" id="new-conversation" type="button">新会话</button>
       </div>
-      <label class="field chat-tenant-field">
+      <div class="field chat-tenant-field">
         <span>租户</span>
-        <select id="tenant-select"></select>
-      </label>
+        <div class="select-control">
+          <button class="select-trigger" id="tenant-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="tenant-menu" disabled>
+            <span id="tenant-label">加载中…</span>
+            <span class="select-caret" aria-hidden="true">⌄</span>
+          </button>
+          <div class="select-menu" id="tenant-menu" role="listbox" aria-label="选择租户" hidden></div>
+        </div>
+      </div>
       <div class="skill-picker" id="skill-picker">
         <div class="skill-picker-head">
           <span>技能</span>
@@ -83,6 +90,6 @@
   </main>
 
   <div class="toast" id="toast" role="status" hidden></div>
-  <script src="/static/chat.js?v=0.3.7"></script>
+  <script src="/static/chat.js?v=0.4.1"></script>
 </body>
 </html>

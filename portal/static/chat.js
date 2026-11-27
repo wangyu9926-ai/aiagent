@@ -247,17 +247,61 @@
 
   // ---------------------------------------------------------------- tenants
 
+  function tenantDisplayName(tenant) {
+    return tenant.runtime_ready ? tenant.name : `${tenant.name}（未配置）`;
+  }
+
+  function updateTenantPicker() {
+    const trigger = $("tenant-trigger");
+    const label = $("tenant-label");
+    if (!trigger || !label) return;
+    const tenant = currentTenant();
+    trigger.disabled = !state.tenants.length;
+    label.textContent = tenant ? tenantDisplayName(tenant) : "没有可用租户";
+    document.querySelectorAll("#tenant-menu .select-option").forEach((option) => {
+      option.setAttribute("aria-selected", option.dataset.tenantId === state.tenantId ? "true" : "false");
+    });
+  }
+
+  function closeTenantMenu() {
+    const menu = $("tenant-menu");
+    const trigger = $("tenant-trigger");
+    if (menu) menu.hidden = true;
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+  }
+
+  function renderTenantMenu() {
+    const menu = $("tenant-menu");
+    clear(menu);
+    for (const tenant of state.tenants) {
+      const option = node("button", "select-option");
+      option.type = "button";
+      option.dataset.tenantId = tenant.id;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", tenant.id === state.tenantId ? "true" : "false");
+      const label = node("span", "", tenant.name);
+      const note = node(
+        "span",
+        "option-note",
+        tenant.runtime_ready ? (tenant.access_role === "viewer" ? "只读" : "") : "未配置运行环境"
+      );
+      label.append(note);
+      option.append(label);
+      if (tenant.id === state.tenantId) option.append(node("span", "option-check", "✓"));
+      option.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeTenantMenu();
+        selectTenant(tenant.id).catch((error) => showToast(error.message, "err"));
+      });
+      menu.append(option);
+    }
+  }
+
   async function loadTenants() {
     const data = await api("/api/me/tenants");
     state.tenants = data.tenants || [];
-    const select = $("tenant-select");
-    clear(select);
-    for (const tenant of state.tenants) {
-      const label = tenant.runtime_ready ? tenant.name : `${tenant.name}（未配置运行环境）`;
-      select.append(new Option(label, tenant.id));
-    }
     if (!state.tenants.length) {
-      select.disabled = true;
+      updateTenantPicker();
       $("new-conversation").disabled = true;
       setComposerEnabled(false);
       setStatus("没有租户");
@@ -265,14 +309,14 @@
       $("chat-sub").textContent = "请联系管理员为你的账号分配一个租户。";
       return;
     }
-    select.disabled = false;
     const preferred =
       (bootTenant && state.tenants.find((item) => item.id === bootTenant)) ||
       state.tenants.find((item) => item.runtime_ready) ||
       state.tenants[0];
     state.tenantId = preferred.id;
-    select.value = state.tenantId;
     state.readonly = preferred.access_role === "viewer" && state.me.user.role !== "admin";
+    updateTenantPicker();
+    renderTenantMenu();
     await loadConversations();
   }
 
@@ -326,6 +370,7 @@
     const tenant = currentTenant();
     state.readonly = !!tenant && tenant.access_role === "viewer" && state.me.user.role !== "admin";
     state.conversationId = "";
+    updateTenantPicker();
     await loadConversations();
   }
 
@@ -1152,8 +1197,17 @@
   // ---------------------------------------------------------------- boot
 
   function bind() {
-    $("tenant-select").addEventListener("change", (event) => {
-      selectTenant(event.target.value).catch((error) => showToast(error.message, "err"));
+    $("tenant-trigger").addEventListener("click", (event) => {
+      event.stopPropagation();
+      const menu = $("tenant-menu");
+      const open = menu.hidden;
+      menu.hidden = !open;
+      event.currentTarget.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    $("tenant-menu").addEventListener("click", (event) => event.stopPropagation());
+    document.addEventListener("click", closeTenantMenu);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeTenantMenu();
     });
     $("new-conversation").addEventListener("click", () => {
       createConversation().catch((error) => showToast(error.message, "err"));
