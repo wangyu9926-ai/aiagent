@@ -19,6 +19,11 @@
     pendingFiles: [],
     watchTimer: null,
     watchStarted: 0,
+    localDirHandle: null,
+    localNeedsPermission: false,
+    localFolder: null,
+    localBaseline: new Map(),
+    localBusy: false,
   };
 
   // Project onboarding opens /chat with a prefilled prompt. It is deliberately
@@ -28,6 +33,20 @@
   const bootTenant = bootParams.get("tenant") || "";
   const bootConversation = bootParams.get("conversation") || "";
   const bootPrompt = bootParams.get("prompt") || "";
+
+  const LOCAL_MAX_FILES = 500;
+  const LOCAL_MAX_FILE_BYTES = 50 * 1024 * 1024;
+  const LOCAL_MAX_BYTES = 200 * 1024 * 1024;
+  const LOCAL_BATCH_FILES = 20;
+  const LOCAL_SKIP_DIRS = new Set([
+    ".git", ".svn", ".hg", "node_modules", ".venv", "venv", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".next", ".cache",
+  ]);
+  const LOCAL_SKIP_FILES = new Set([
+    ".env", ".env.local", ".env.production", ".env.development",
+    "id_rsa", "id_ed25519", "credentials.json", "auth.json",
+  ]);
+  const LOCAL_SKIP_SUFFIXES = [".pem", ".key", ".pfx", ".p12"];
 
   const $ = (id) => document.getElementById(id);
 
@@ -40,6 +59,53 @@
 
   function clear(element) {
     while (element.firstChild) element.removeChild(element.firstChild);
+  }
+
+  // IndexedDB stores FileSystemDirectoryHandle objects across reloads.
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open("hermes-local-bridge", 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function idbGet(key) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("kv", "readonly");
+      const request = tx.objectStore("kv").get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function idbSet(key, value) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("kv", "readwrite");
+      tx.objectStore("kv").put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function idbDel(key) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("kv", "readwrite");
+      tx.objectStore("kv").delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  function localKey(prefix) {
+    return `${prefix}:${state.conversationId}`;
   }
 
   function formatBytes(bytes) {
@@ -249,6 +315,11 @@
   async function selectTenant(tenantId) {
     stopWatch();
     clearPendingFiles();
+    state.localFolder = null;
+    state.localDirHandle = null;
+    state.localNeedsPermission = false;
+    state.localBaseline = new Map();
+    renderLocalBridge();
     state.tenantId = tenantId;
     const tenant = currentTenant();
     state.readonly = !!tenant && tenant.access_role === "viewer" && state.me.user.role !== "admin";
@@ -271,6 +342,11 @@
     });
     state.conversations.unshift(data.conversation);
     state.conversationId = data.conversation.id;
+    state.localFolder = null;
+    state.localDirHandle = null;
+    state.localNeedsPermission = false;
+    state.localBaseline = new Map();
+    renderLocalBridge();
     renderConversations();
     renderMessages([]);
     $("chat-title").textContent = "新会话";
@@ -321,7 +397,7 @@
   }
 
   async function selectConversation(conversationId) {
-    if (state.streaming) return;
+    if (state.streaming || state.localBusy) return;
     stopWatch();
     if (state.conversationId && state.conversationId !== conversationId) clearPendingFiles();
     state.conversationId = conversationId;
@@ -337,9 +413,386 @@
       state.readonly = !!tenant && tenant.access_role === "viewer" && state.me.user.role !== "admin";
       setStatus(ready ? "就绪" : "未配置运行环境", ready ? "" : "danger");
       setComposerEnabled(ready && !state.readonly);
+      await loadLocalFolderState();
       watchActiveRun().catch(() => {});
     } catch (error) {
       showToast(error.message, "err");
+    }
+  }
+
+  // ---------------------------------------------------------------- local folder bridge
+
+  function setLocalStatus(text) {
+    const hint = $("local-hint");
+    if (hint) hint.textContent = text;
+  }
+
+  function renderLocalBridge() {
+    const badge = $("local-badge");
+    if (!badge) return;
+    const connectBtn = $("local-connect");
+    const syncBtn = $("local-sync");
+    const disconnectBtn = $("local-disconnect");
+    const folder = state.localFolder;
+    const handle = state.localDirHandle;
+    const busy = state.localBusy;
+
+    badge.className = "badge";
+    if (state.readonly) {
+      badge.textContent = "只读";
+    } else if (busy) {
+      badge.textContent = "处理中";
+    } else if (folder && handle && !state.localNeedsPermission) {
+      badge.textContent = "已授权";
+    } else if (folder) {
+      badge.textContent = "需重新授权";
+      badge.className = "badge danger";
+    } else {
+      badge.textContent = "未连接";
+    }
+
+    connectBtn.disabled = busy || state.readonly || !state.conversationId;
+    connectBtn.textContent = state.localNeedsPermission
+      ? "重新授权"
+      : folder
+        ? "重新选择文件夹"
+        : "连接文件夹";
+    syncBtn.hidden = !(folder && handle && !state.localNeedsPermission) || busy || state.readonly;
+    syncBtn.disabled = busy;
+    disconnectBtn.hidden = !(folder || handle);
+    disconnectBtn.disabled = busy;
+
+    if (busy) return;
+    if (folder && handle) {
+      setLocalStatus(
+        `已授权「${folder.name}」，服务器副本 ${folder.file_count || 0} 个文件。Agent 改完后点“同步回本地”。`
+      );
+    } else if (folder) {
+      setLocalStatus("服务器已有副本，但浏览器需要重新选择/授权这个文件夹，才能同步回本地。");
+    } else if (handle && state.localNeedsPermission) {
+      setLocalStatus("浏览器需要重新确认这个文件夹的读写权限。");
+    } else {
+      setLocalStatus("授权一个目录后，Agent 会读写它的服务器副本；改完点“同步回本地”。");
+    }
+  }
+
+  async function loadLocalFolderState() {
+    state.localFolder = null;
+    state.localDirHandle = null;
+    state.localNeedsPermission = false;
+    state.localBaseline = new Map();
+    renderLocalBridge();
+    const cid = state.conversationId;
+    if (!cid) return;
+    try {
+      const data = await api(`/api/chat/conversations/${encodeURIComponent(cid)}/local-folder`);
+      if (cid !== state.conversationId) return;
+      state.localFolder = data.connected ? data.folder : null;
+    } catch (error) {
+      console.warn(error);
+    }
+    try {
+      const handle = await idbGet(localKey("dir"));
+      if (handle && typeof handle.queryPermission === "function") {
+        const permission = await handle.queryPermission({ mode: "readwrite" });
+        if (permission === "granted") {
+          state.localDirHandle = handle;
+        } else if (permission === "prompt") {
+          state.localDirHandle = handle;
+          state.localNeedsPermission = true;
+        } else {
+          await idbDel(localKey("dir"));
+        }
+      }
+    } catch (error) {
+      console.warn(error);
+    }
+    try {
+      const baseline = await idbGet(localKey("base"));
+      if (baseline && typeof baseline === "object") {
+        state.localBaseline = new Map(Object.entries(baseline));
+      }
+    } catch (error) {
+      console.warn(error);
+    }
+    if (cid === state.conversationId) renderLocalBridge();
+  }
+
+  async function collectLocalFiles(rootHandle) {
+    const files = [];
+    let total = 0;
+    const skipped = [];
+
+    async function walk(directory, prefix, depth) {
+      if (depth > 16) return;
+      for await (const [name, child] of directory.entries()) {
+        if (name === "." || name === "..") continue;
+        const relative = prefix ? `${prefix}/${name}` : name;
+        if (child.kind === "directory") {
+          if (LOCAL_SKIP_DIRS.has(name)) continue;
+          await walk(child, relative, depth + 1);
+          continue;
+        }
+        const lower = name.toLowerCase();
+        if (LOCAL_SKIP_FILES.has(lower) || LOCAL_SKIP_SUFFIXES.some((suffix) => lower.endsWith(suffix))) {
+          if (skipped.length < 50) skipped.push(relative);
+          continue;
+        }
+        const file = await child.getFile();
+        if (file.size > LOCAL_MAX_FILE_BYTES) {
+          if (skipped.length < 50) skipped.push(relative);
+          continue;
+        }
+        if (files.length >= LOCAL_MAX_FILES || total + file.size > LOCAL_MAX_BYTES) {
+          if (skipped.length < 50) skipped.push(relative);
+          continue;
+        }
+        files.push({ path: relative, file });
+        total += file.size;
+      }
+    }
+
+    await walk(rootHandle, "", 0);
+    return { files, total, skipped };
+  }
+
+  async function uploadLocalFolder(handle) {
+    setLocalStatus("正在扫描本地文件…");
+    const { files, skipped } = await collectLocalFiles(handle);
+    if (!files.length) {
+      await loadLocalManifestBaseline();
+      showToast("文件夹为空，或没有可同步的文件");
+      if (skipped.length) showToast("已跳过敏感/超大/超限文件", "err");
+      return;
+    }
+    let done = 0;
+    for (let start = 0; start < files.length; start += LOCAL_BATCH_FILES) {
+      const batch = files.slice(start, start + LOCAL_BATCH_FILES);
+      const form = new FormData();
+      for (const item of batch) {
+        form.append("paths", item.path);
+        form.append("files", item.file, item.file.name);
+      }
+      const response = await fetch(
+        `/api/chat/conversations/${encodeURIComponent(state.conversationId)}/local-folder/upload`,
+        {
+          method: "POST",
+          headers: { "X-Portal-CSRF": state.csrf },
+          credentials: "same-origin",
+          body: form,
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(errorText(data, response.status));
+      done += batch.length;
+      setLocalStatus(`上传本地文件 ${done}/${files.length}…`);
+    }
+    await loadLocalManifestBaseline();
+    const note = skipped.length ? `，跳过 ${skipped.length} 个敏感/超大文件` : "";
+    showToast(`本地文件夹已连接：${files.length} 个文件${note}`);
+  }
+
+  async function loadLocalManifestBaseline() {
+    const data = await api(`/api/chat/conversations/${encodeURIComponent(state.conversationId)}/local-folder/files`);
+    state.localFolder = data.folder;
+    state.localBaseline = new Map((data.files || []).map((item) => [item.path, item.sha256]));
+    await idbSet(localKey("base"), Object.fromEntries(state.localBaseline));
+  }
+
+  async function connectLocalFolder() {
+    if (!state.conversationId) {
+      showToast("先选择或新建一个会话", "err");
+      return;
+    }
+    if (state.readonly || state.localBusy) return;
+    if (!window.showDirectoryPicker) {
+      showToast("当前浏览器不支持文件夹授权，请用 Edge/Chrome", "err");
+      return;
+    }
+    if (state.localDirHandle && state.localNeedsPermission) {
+      try {
+        const permission = await state.localDirHandle.requestPermission({ mode: "readwrite" });
+        if (permission !== "granted") {
+          showToast("没有获得文件夹读写权限", "err");
+          return;
+        }
+        state.localNeedsPermission = false;
+        await idbSet(localKey("dir"), state.localDirHandle);
+        renderLocalBridge();
+        showToast("文件夹权限已恢复");
+      } catch (error) {
+        showToast(error.message, "err");
+      }
+      return;
+    }
+    let handle;
+    try {
+      handle = await window.showDirectoryPicker({ mode: "readwrite", id: "hermes-local" });
+    } catch (error) {
+      if (error.name !== "AbortError") showToast(error.message, "err");
+      return;
+    }
+    state.localDirHandle = handle;
+    state.localNeedsPermission = false;
+    await idbSet(localKey("dir"), handle);
+    state.localBusy = true;
+    renderLocalBridge();
+    try {
+      const prepared = await api(
+        `/api/chat/conversations/${encodeURIComponent(state.conversationId)}/local-folder`,
+        { method: "POST", body: { name: handle.name } }
+      );
+      state.localFolder = prepared.folder;
+      const serverCount = Number(prepared.folder?.file_count || 0);
+      let upload = true;
+      if (serverCount > 0) {
+        upload = window.confirm(
+          state.localBaseline.size
+            ? "服务器已有这个文件夹的副本。要把本地当前文件重新上传覆盖服务器吗？取消则保留服务器副本，稍后可直接点“同步回本地”。"
+            : "服务器已有这个文件夹的副本。重新上传会用本地文件覆盖服务器副本；如果只想拉取服务器改动，请取消。"
+        );
+      }
+      if (upload) await uploadLocalFolder(handle);
+      else await loadLocalManifestBaseline();
+      await loadLocalFolderState();
+    } catch (error) {
+      showToast(error.message, "err");
+      renderLocalBridge();
+    } finally {
+      state.localBusy = false;
+      renderLocalBridge();
+    }
+  }
+
+  async function localFileHandle(root, relative, create) {
+    const parts = String(relative || "").split("/").filter(Boolean);
+    if (!parts.length || parts.some((part) => part === "." || part === "..")) {
+      throw new Error("文件路径不合法");
+    }
+    let directory = root;
+    for (const part of parts.slice(0, -1)) {
+      directory = await directory.getDirectoryHandle(part, { create: Boolean(create) });
+    }
+    return directory.getFileHandle(parts[parts.length - 1], { create: Boolean(create) });
+  }
+
+  async function sha256Hex(buffer) {
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  async function syncLocalFolder() {
+    if (state.readonly || state.localBusy) return;
+    if (!state.localFolder) {
+      showToast("这个会话还没有授权本地文件夹", "err");
+      return;
+    }
+    if (!state.localDirHandle) {
+      showToast("请先重新选择本地文件夹", "err");
+      return;
+    }
+    if (state.localNeedsPermission) {
+      const permission = await state.localDirHandle.requestPermission({ mode: "readwrite" });
+      if (permission !== "granted") {
+        showToast("没有获得文件夹读写权限", "err");
+        return;
+      }
+      state.localNeedsPermission = false;
+      await idbSet(localKey("dir"), state.localDirHandle);
+    }
+    state.localBusy = true;
+    renderLocalBridge();
+    try {
+      const manifest = await api(
+        `/api/chat/conversations/${encodeURIComponent(state.conversationId)}/local-folder/files`
+      );
+      state.localFolder = manifest.folder;
+      const baseline = state.localBaseline;
+      const changes = [];
+      let conflicts = 0;
+      for (const file of manifest.files || []) {
+        const base = baseline.get(file.path);
+        if (base === file.sha256) continue;
+        let localHash = null;
+        try {
+          const handle = await localFileHandle(state.localDirHandle, file.path, false);
+          const localFile = await handle.getFile();
+          localHash = await sha256Hex(await localFile.arrayBuffer());
+        } catch {
+          localHash = null;
+        }
+        if (localHash && base !== undefined && localHash !== base) conflicts += 1;
+        if (localHash && base === undefined && localHash !== file.sha256) conflicts += 1;
+        changes.push(file);
+      }
+      if (!changes.length) {
+        showToast("没有需要同步回本地的改动");
+        return;
+      }
+      if (conflicts > 0) {
+        const go = window.confirm(
+          `服务器有 ${changes.length} 个文件改动，其中 ${conflicts} 个本地文件也被修改过。继续会覆盖本地版本，是否继续？`
+        );
+        if (!go) return;
+      } else if (!baseline.size) {
+        const go = window.confirm("首次同步会用服务器副本覆盖本地同名文件，是否继续？");
+        if (!go) return;
+      }
+      let done = 0;
+      for (const file of changes) {
+        const response = await fetch(
+          `/api/chat/conversations/${encodeURIComponent(state.conversationId)}/local-folder/download?path=${encodeURIComponent(file.path)}`,
+          { credentials: "same-origin" }
+        );
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(errorText(data, response.status));
+        }
+        const buffer = await response.arrayBuffer();
+        const handle = await localFileHandle(state.localDirHandle, file.path, true);
+        const writable = await handle.createWritable();
+        await writable.write(buffer);
+        await writable.close();
+        baseline.set(file.path, file.sha256);
+        done += 1;
+        setLocalStatus(`写回本地 ${done}/${changes.length}…`);
+      }
+      state.localBaseline = baseline;
+      await idbSet(localKey("base"), Object.fromEntries(baseline));
+      showToast(`已同步 ${changes.length} 个文件到本地`);
+    } catch (error) {
+      showToast(error.message, "err");
+    } finally {
+      state.localBusy = false;
+      renderLocalBridge();
+    }
+  }
+
+  async function disconnectLocalFolder() {
+    if (state.localBusy) return;
+    if (!window.confirm("断开并删除服务器上的副本？本地文件不会被删除。")) return;
+    state.localBusy = true;
+    renderLocalBridge();
+    try {
+      if (state.conversationId) {
+        await api(`/api/chat/conversations/${encodeURIComponent(state.conversationId)}/local-folder`, {
+          method: "DELETE",
+        });
+      }
+      await idbDel(localKey("dir"));
+      await idbDel(localKey("base"));
+      state.localFolder = null;
+      state.localDirHandle = null;
+      state.localNeedsPermission = false;
+      state.localBaseline = new Map();
+      showToast("已断开本地文件夹");
+    } catch (error) {
+      showToast(error.message, "err");
+    } finally {
+      state.localBusy = false;
+      renderLocalBridge();
     }
   }
 
@@ -616,6 +1069,15 @@
     $("new-conversation").addEventListener("click", () => {
       createConversation().catch((error) => showToast(error.message, "err"));
     });
+    $("local-connect").addEventListener("click", () => {
+      connectLocalFolder().catch((error) => showToast(error.message, "err"));
+    });
+    $("local-sync").addEventListener("click", () => {
+      syncLocalFolder().catch((error) => showToast(error.message, "err"));
+    });
+    $("local-disconnect").addEventListener("click", () => {
+      disconnectLocalFolder().catch((error) => showToast(error.message, "err"));
+    });
     // The composer is a <form> for semantics, but sending never goes through
     // native form submission: a reload would abort the SSE stream mid-run.
     $("composer").addEventListener("submit", (event) => event.preventDefault());
@@ -701,6 +1163,7 @@
       return;
     }
     bind();
+    renderLocalBridge();
     try {
       await loadTenants();
       prefillOnboardPrompt();

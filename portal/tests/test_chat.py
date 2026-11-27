@@ -371,6 +371,58 @@ class ChatTests(unittest.TestCase):
         finally:
             bob.__exit__(None, None, None)
 
+    def test_local_folder_bridge_round_trip(self) -> None:
+        alice, csrf = self.user_client("alice", "alice-pass-123")
+        try:
+            conversation = self.make_conversation(alice, csrf)
+            connected = alice.post(
+                f"/api/chat/conversations/{conversation['id']}/local-folder",
+                json={"name": "我的资料"},
+                headers={"X-Portal-CSRF": csrf},
+            )
+            self.assertEqual(connected.status_code, 200, connected.text)
+            self.assertEqual(connected.json()["folder"]["server_path"].split("/")[-1], "local")
+            uploaded = alice.post(
+                f"/api/chat/conversations/{conversation['id']}/local-folder/upload",
+                data={"paths": ["notes/a.txt", "notes/b.txt"]},
+                files=[
+                    ("files", ("a.txt", b"hello", "text/plain")),
+                    ("files", ("b.txt", b"world", "text/plain")),
+                ],
+                headers={"X-Portal-CSRF": csrf},
+            )
+            self.assertEqual(uploaded.status_code, 200, uploaded.text)
+            self.assertEqual(uploaded.json()["accepted"], 2)
+            manifest = alice.get(
+                f"/api/chat/conversations/{conversation['id']}/local-folder/files"
+            )
+            self.assertEqual(manifest.status_code, 200, manifest.text)
+            paths = [item["path"] for item in manifest.json()["files"]]
+            self.assertEqual(paths, ["notes/a.txt", "notes/b.txt"])
+            download = alice.get(
+                f"/api/chat/conversations/{conversation['id']}/local-folder/download",
+                params={"path": "notes/a.txt"},
+            )
+            self.assertEqual(download.status_code, 200)
+            self.assertEqual(download.content, b"hello")
+            blocked = alice.post(
+                f"/api/chat/conversations/{conversation['id']}/local-folder/upload",
+                data={"paths": ["../escape.txt"]},
+                files=[("files", ("escape.txt", b"x", "text/plain"))],
+                headers={"X-Portal-CSRF": csrf},
+            )
+            self.assertEqual(blocked.status_code, 400)
+            removed = alice.delete(
+                f"/api/chat/conversations/{conversation['id']}/local-folder",
+                headers={"X-Portal-CSRF": csrf},
+            )
+            self.assertEqual(removed.status_code, 200, removed.text)
+            self.assertFalse(
+                alice.get(f"/api/chat/conversations/{conversation['id']}/local-folder").json()["connected"]
+            )
+        finally:
+            alice.__exit__(None, None, None)
+
     def test_stale_heartbeat_blocks_chat(self) -> None:
         alice, csrf = self.user_client("alice", "alice-pass-123")
         try:

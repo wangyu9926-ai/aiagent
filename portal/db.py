@@ -145,6 +145,16 @@ CREATE TABLE IF NOT EXISTS chat_attachments (
 
 CREATE INDEX IF NOT EXISTS idx_chat_attachments_conversation ON chat_attachments (conversation_id, id);
 
+CREATE TABLE IF NOT EXISTS local_folders (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    server_path TEXT NOT NULL,
+    file_count INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    connected_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tenant_heartbeats (
     tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
     last_seen REAL NOT NULL,
@@ -1072,6 +1082,58 @@ def get_attachment(
         (attachment_id, conversation_id, user_id),
     ).fetchone()
     return dict(row) if row is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Local folder bridge
+# ---------------------------------------------------------------------------
+
+
+def set_local_folder(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    *,
+    name: str,
+    server_path: str,
+    file_count: int = 0,
+    total_bytes: int = 0,
+) -> dict[str, Any]:
+    created = now()
+    conn.execute(
+        "INSERT INTO local_folders "
+        "(conversation_id, name, server_path, file_count, total_bytes, connected_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (conversation_id) DO UPDATE SET "
+        "name = excluded.name, server_path = excluded.server_path, "
+        "file_count = excluded.file_count, total_bytes = excluded.total_bytes, "
+        "updated_at = excluded.updated_at",
+        (conversation_id, name, server_path, int(file_count), int(total_bytes), created, created),
+    )
+    conn.commit()
+    return get_local_folder(conn, conversation_id) or {}
+
+
+def get_local_folder(conn: sqlite3.Connection, conversation_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM local_folders WHERE conversation_id = ?", (conversation_id,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def update_local_folder_stats(
+    conn: sqlite3.Connection, conversation_id: str, *, file_count: int, total_bytes: int
+) -> None:
+    conn.execute(
+        "UPDATE local_folders SET file_count = ?, total_bytes = ?, updated_at = ? "
+        "WHERE conversation_id = ?",
+        (int(file_count), int(total_bytes), now(), conversation_id),
+    )
+    conn.commit()
+
+
+def delete_local_folder(conn: sqlite3.Connection, conversation_id: str) -> None:
+    conn.execute("DELETE FROM local_folders WHERE conversation_id = ?", (conversation_id,))
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------

@@ -124,7 +124,20 @@ Every tenant's `portal-audit` plugin posts `/api/tenants/heartbeat` on load and 
 
 ### Business guard
 
-The business tenant also loads `business-guard` as a `pre_tool_call` hook. It blocks file access to Hermes config, credentials and audit state, and blocks browser URLs pointing at `file://` or internal services (`portal`, `egress`, loopback). It does not remove regular file tools for `/uploads` or normal project files.
+The business tenant also loads `business-guard` as a `pre_tool_call` hook. It blocks file access to Hermes config, credentials and audit state, and blocks browser URLs pointing at `file://` or internal services (`portal`, `egress`, loopback). It does not remove regular file tools for `/uploads` or normal project files. Writes are limited to `/uploads/business` plus the tenant's own `skills/` and `memories/` directories.
+
+## Local folder bridge
+
+A member can authorize one local directory per conversation from the chat sidebar (`连接文件夹`). Chromium browsers only (Edge/Chrome); the portal must be served over HTTPS or localhost because the File System Access API needs a secure context.
+
+- The browser uploads the selected directory into the conversation's server mirror under `/uploads/<tenant>/<conversation>/local`.
+- The agent reads and writes that mirror with normal file tools; each user turn carries a note naming the mirror path.
+- `同步回本地` downloads server changes and writes them through the still-authorized directory handle. SHA-256 baselines detect files changed locally too and the user is asked before overwriting.
+- Limits: 500 files, 50 MB per file, 200 MB per folder. `.git`, `node_modules`, virtualenvs, `.env`, private keys and credential files are skipped.
+- `断开` deletes the server mirror and clears the browser handle; local files are untouched.
+- File contents processed by the agent enter the normal audit trail.
+
+The directory handle is stored in IndexedDB per conversation. After a browser restart the user may need to click `重新授权` once; the server mirror and baseline remain.
 
 ## Environment
 

@@ -93,6 +93,9 @@ services:
       NO_PROXY: localhost,127.0.0.1,hermes-tenant-business,portal,egress,egress-web
       # The shared /uploads mount is tenant-isolated by business-guard.
       HERMES_BUSINESS_UPLOAD_ROOT: /uploads/business
+      # v0.17's single safe-root check breaks for "/" and blocks /uploads. Leave it
+      # unset and let business-guard enforce the write allowlist.
+      HERMES_WRITE_SAFE_ROOT: ""
     networks:
       - hermes-tenant-net
     depends_on:

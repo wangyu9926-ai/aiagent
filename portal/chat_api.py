@@ -8,19 +8,21 @@ spine's route table.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import secrets
+import shutil
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Literal, Optional
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from portal import auth, db
@@ -34,6 +36,19 @@ BLOCKED_EXTENSIONS = {
     "exe", "dll", "msi", "bat", "cmd", "com", "scr", "ps1", "vbs", "jar",
 }
 HEARTBEAT_MAX_AGE_SECONDS = 180
+LOCAL_FOLDER_MAX_FILES = 500
+LOCAL_FILE_MAX_BYTES = 50 * 1024 * 1024
+LOCAL_FOLDER_MAX_BYTES = 200 * 1024 * 1024
+LOCAL_BATCH_FILES = 20
+LOCAL_SKIP_DIRS = {
+    ".git", ".svn", ".hg", "node_modules", ".venv", "venv", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".next", ".cache",
+}
+LOCAL_SKIP_FILES = {
+    ".env", ".env.local", ".env.production", ".env.development",
+    "id_rsa", "id_ed25519", "credentials.json", "auth.json",
+}
+LOCAL_SKIP_SUFFIXES = (".pem", ".key", ".pfx", ".p12")
 
 logger = logging.getLogger("portal.chat")
 _background_tasks: set[asyncio.Task] = set()
@@ -246,6 +261,10 @@ class ProjectIn(BaseModel):
     repo_url: str = Field(default="", max_length=500)
     known: str = Field(default="", max_length=4000)
     unknowns: str = Field(default="", max_length=4000)
+
+
+class LocalFolderIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
 
 
 class ChatIn(BaseModel):
@@ -789,6 +808,88 @@ def _safe_filename(value: str) -> str:
     return name
 
 
+def _local_root(settings: Any, conversation: dict[str, Any]) -> Path:
+    upload_root = settings.upload_dir or (settings.data_dir / "uploads")
+    return upload_root / conversation["tenant_id"] / conversation["id"] / "local"
+
+
+def _safe_local_relpath(raw: str) -> str:
+    text = str(raw or "").replace("\\", "/").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="本地文件路径为空")
+    pure = PurePosixPath(text)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise HTTPException(status_code=400, detail="本地文件路径不合法")
+    parts = [part for part in pure.parts if part not in ("", ".")]
+    if not parts or len(parts) > 32:
+        raise HTTPException(status_code=400, detail="本地文件路径层级不合法")
+    for part in parts:
+        if len(part) > 160 or ":" in part or "\x00" in part:
+            raise HTTPException(status_code=400, detail="本地文件名不合法")
+        if part in LOCAL_SKIP_DIRS:
+            raise HTTPException(status_code=400, detail=f"跳过目录：{part}")
+    name = parts[-1].lower()
+    if name in LOCAL_SKIP_FILES or name.endswith(LOCAL_SKIP_SUFFIXES):
+        raise HTTPException(status_code=400, detail="为避免泄露密钥，已跳过敏感文件")
+    return "/".join(parts)
+
+
+def _local_file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _local_stats(root: Path) -> tuple[int, int]:
+    count = 0
+    total = 0
+    if not root.is_dir():
+        return count, total
+    root_resolved = root.resolve()
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if not path.resolve().is_relative_to(root_resolved):
+            continue
+        count += 1
+        total += path.stat().st_size
+    return count, total
+
+
+def _local_manifest(root: Path) -> tuple[list[dict[str, Any]], int]:
+    files: list[dict[str, Any]] = []
+    total = 0
+    if not root.is_dir():
+        return files, total
+    root_resolved = root.resolve()
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if not path.resolve().is_relative_to(root_resolved):
+            continue
+        relative = path.relative_to(root).as_posix()
+        if any(part in LOCAL_SKIP_DIRS for part in PurePosixPath(relative).parts):
+            continue
+        file_name = PurePosixPath(relative).name.lower()
+        if file_name in LOCAL_SKIP_FILES or file_name.endswith(LOCAL_SKIP_SUFFIXES):
+            continue
+        stat = path.stat()
+        total += stat.st_size
+        files.append(
+            {
+                "path": relative,
+                "size": stat.st_size,
+                "sha256": _local_file_hash(path),
+                "updated_at": stat.st_mtime,
+            }
+        )
+        if len(files) >= 2000:
+            break
+    return files, total
+
+
 @router.post("/api/chat/conversations/{conversation_id}/attachments")
 def upload_attachments(
     conversation_id: str,
@@ -863,6 +964,202 @@ def upload_attachments(
     return {"attachments": saved}
 
 
+# ---------------------------------------------------------------------------
+# Local folder bridge
+# ---------------------------------------------------------------------------
+
+
+def _local_folder_payload(settings: Any, conversation: dict[str, Any]) -> dict[str, Any]:
+    server_path = f"/uploads/{conversation['tenant_id']}/{conversation['id']}/local"
+    return {"server_path": server_path}
+
+
+@router.get("/api/chat/conversations/{conversation_id}/local-folder")
+def local_folder_get(
+    conversation_id: str,
+    request: Request,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    conversation = _conversation_for(conn, user, conversation_id)
+    folder = db.get_local_folder(conn, conversation_id)
+    if folder is None:
+        return {"connected": False, "folder": None}
+    root = _local_root(request.app.state.settings, conversation)
+    if not root.is_dir():
+        db.delete_local_folder(conn, conversation_id)
+        return {"connected": False, "folder": None}
+    return {
+        "connected": True,
+        "folder": {
+            **folder,
+            **_local_folder_payload(request.app.state.settings, conversation),
+        },
+    }
+
+
+@router.post("/api/chat/conversations/{conversation_id}/local-folder")
+def local_folder_connect(
+    conversation_id: str,
+    body: LocalFolderIn,
+    request: Request,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    check_csrf(request, user)
+    conversation = _conversation_for(conn, user, conversation_id)
+    if conversation["user_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="不能给其他人的会话授权本地文件夹")
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="只读账号不能授权本地文件夹")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="文件夹名不能为空")
+    root = _local_root(request.app.state.settings, conversation)
+    existing = db.get_local_folder(conn, conversation_id)
+    file_count = 0
+    total_bytes = 0
+    if existing is not None and existing["name"] == name and root.is_dir():
+        file_count = int(existing["file_count"])
+        total_bytes = int(existing["total_bytes"])
+    else:
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        root.chmod(0o777)
+    except OSError:
+        pass
+    folder = db.set_local_folder(
+        conn,
+        conversation_id,
+        name=name,
+        server_path=_local_folder_payload(request.app.state.settings, conversation)["server_path"],
+        file_count=file_count,
+        total_bytes=total_bytes,
+    )
+    return {"connected": True, "folder": {**folder, **_local_folder_payload(request.app.state.settings, conversation)}}
+
+
+@router.post("/api/chat/conversations/{conversation_id}/local-folder/upload")
+async def local_folder_upload(
+    conversation_id: str,
+    request: Request,
+    paths: list[str] = Form(...),
+    files: list[UploadFile] = File(...),
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    check_csrf(request, user)
+    conversation = _conversation_for(conn, user, conversation_id)
+    if conversation["user_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="不能给其他人的会话上传本地文件夹")
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="只读账号不能上传本地文件夹")
+    folder = db.get_local_folder(conn, conversation_id)
+    if folder is None:
+        raise HTTPException(status_code=409, detail="请先在浏览器授权本地文件夹")
+    if not files or len(files) != len(paths):
+        raise HTTPException(status_code=400, detail="文件与路径数量不一致")
+    if len(files) > LOCAL_BATCH_FILES:
+        raise HTTPException(status_code=413, detail=f"单批最多 {LOCAL_BATCH_FILES} 个文件")
+    root = _local_root(request.app.state.settings, conversation)
+    root.mkdir(parents=True, exist_ok=True)
+    root_resolved = root.resolve()
+    current_count, current_bytes = _local_stats(root)
+    if current_count >= LOCAL_FOLDER_MAX_FILES:
+        raise HTTPException(status_code=413, detail=f"文件夹最多 {LOCAL_FOLDER_MAX_FILES} 个文件")
+    uploaded: list[dict[str, Any]] = []
+    total_added = 0
+    for raw_path, upload in zip(paths, files):
+        relative = _safe_local_relpath(raw_path)
+        unresolved = root / relative
+        if unresolved.is_symlink():
+            raise HTTPException(status_code=400, detail="不允许写入符号链接")
+        target = unresolved.resolve()
+        if not target.is_relative_to(root_resolved):
+            raise HTTPException(status_code=400, detail="本地文件路径越界")
+        data = await upload.read()
+        if len(data) > LOCAL_FILE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail=f"{relative} 超过 50 MB")
+        total_added += len(data)
+        if current_bytes + total_added > LOCAL_FOLDER_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="本地文件夹总量超过 200 MB")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.parent.chmod(0o777)
+        except OSError:
+            pass
+        target.write_bytes(data)
+        try:
+            target.chmod(0o666)
+        except OSError:
+            pass
+        uploaded.append(
+            {"path": relative, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        )
+    count, total = _local_stats(root)
+    db.update_local_folder_stats(conn, conversation_id, file_count=count, total_bytes=total)
+    return {"accepted": len(uploaded), "uploaded": uploaded, "file_count": count, "total_bytes": total}
+
+
+@router.get("/api/chat/conversations/{conversation_id}/local-folder/files")
+def local_folder_files(
+    conversation_id: str,
+    request: Request,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    conversation = _conversation_for(conn, user, conversation_id)
+    folder = db.get_local_folder(conn, conversation_id)
+    if folder is None:
+        raise HTTPException(status_code=404, detail="这个会话还没有授权本地文件夹")
+    root = _local_root(request.app.state.settings, conversation)
+    files, total = _local_manifest(root)
+    db.update_local_folder_stats(conn, conversation_id, file_count=len(files), total_bytes=total)
+    folder = db.get_local_folder(conn, conversation_id) or folder
+    return {
+        "folder": {**folder, **_local_folder_payload(request.app.state.settings, conversation)},
+        "files": files,
+        "total_bytes": total,
+    }
+
+
+@router.get("/api/chat/conversations/{conversation_id}/local-folder/download")
+def local_folder_download(
+    conversation_id: str,
+    path: str,
+    request: Request,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    conversation = _conversation_for(conn, user, conversation_id)
+    if db.get_local_folder(conn, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="这个会话还没有授权本地文件夹")
+    relative = _safe_local_relpath(path)
+    root = _local_root(request.app.state.settings, conversation)
+    target = (root / relative).resolve()
+    if not target.is_relative_to(root.resolve()) or not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(target, media_type="application/octet-stream", filename=Path(relative).name)
+
+
+@router.delete("/api/chat/conversations/{conversation_id}/local-folder")
+def local_folder_disconnect(
+    conversation_id: str,
+    request: Request,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    check_csrf(request, user)
+    conversation = _conversation_for(conn, user, conversation_id)
+    if conversation["user_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="不能清理其他人的会话")
+    root = _local_root(request.app.state.settings, conversation)
+    shutil.rmtree(root, ignore_errors=True)
+    db.delete_local_folder(conn, conversation_id)
+    return {"ok": True}
+
+
 @router.post("/api/chat/conversations/{conversation_id}/messages")
 async def send_chat_message(
     conversation_id: str,
@@ -919,6 +1216,16 @@ async def send_chat_message(
             )
             lines.append(f"- {row['name']}: {row['stored_path']} ({row['size']} bytes)")
         attachment_note = (chr(10) + chr(10) + "[用户上传了附件，可直接用文件/终端工具读取]" + chr(10) + chr(10).join(lines))
+    local_folder = db.get_local_folder(conn, conversation_id)
+    local_note = ""
+    if local_folder is not None:
+        local_note = (
+            chr(10) * 2
+            + f"[用户已授权本地文件夹「{local_folder['name']}」，服务器镜像路径：{local_folder['server_path']}，"
+            + f"当前 {local_folder['file_count']} 个文件 / {local_folder['total_bytes']} 字节。"
+            + "可以直接读取和修改这个目录里的文件；用户会在浏览器点“同步回本地”把改动写回自己的电脑。"
+            + "优先只改这个目录，不要访问其他本地路径。]"
+        )
     db.add_message(
         conn,
         conversation_id,
@@ -940,8 +1247,9 @@ async def send_chat_message(
     payload_messages.reverse()
     if not payload_messages:
         payload_messages = [{"role": "user", "content": content}]
-    if attachment_note and payload_messages and payload_messages[-1]["role"] == "user":
-        payload_messages[-1]["content"] = content + attachment_note
+    extra_note = attachment_note + local_note
+    if extra_note and payload_messages and payload_messages[-1]["role"] == "user":
+        payload_messages[-1]["content"] = content + extra_note
     model = runtime.get("model") or "hermes-agent"
     upstream_url = runtime["base_url"].rstrip("/") + "/v1/chat/completions"
     headers = {

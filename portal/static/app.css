@@ -358,6 +358,14 @@ p { margin: 0; }
   height: 36px; border-radius: 9px; border: 1px solid var(--line);
   background: var(--bg-2); color: var(--text); padding: 0 10px; font: inherit;
 }
+.local-bridge {
+  padding: 10px; border-radius: 10px; border: 1px solid var(--line-soft);
+  background: rgba(45, 212, 191, 0.04); display: flex; flex-direction: column; gap: 7px;
+}
+.local-bridge-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.local-bridge-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.local-bridge-actions .btn { padding: 5px 8px; font-size: 11px; }
+.local-bridge .small { font-size: 11px; line-height: 1.45; }
 .conversation-list { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 3px; }
 .conversation-item {
   display: flex; flex-direction: column; gap: 2px; text-align: left;

@@ -17,6 +17,7 @@ from pathlib import PurePosixPath
 logger = logging.getLogger("hermes.business_guard")
 
 BLOCK_MESSAGE = "业务工作区禁止访问 Hermes 配置文件、密钥、审计 Token 或内部服务。"
+WRITE_BLOCK_MESSAGE = "业务工作区只允许写 /uploads/business，以及自己的 skills/memories 目录。"
 
 # These live under HERMES_HOME (/opt/data). User work belongs in /uploads or
 # other non-sensitive paths.
@@ -47,6 +48,7 @@ INTERNAL_HOSTS = (
 )
 
 FILE_TOOLS = {"read_file", "write_file", "patch", "search_files", "vision_analyze"}
+WRITE_TOOLS = {"write_file", "patch"}
 
 # Recursive search must never start above the tenant's own workspace: a search
 # rooted at / or /opt/data would return lines from .env/config.yaml/sessions.
@@ -105,6 +107,16 @@ def _blocks_search(path: str) -> bool:
     return _blocks_path(normalized)
 
 
+def _blocks_write(path: str) -> bool:
+    """Business writes are limited to its upload tree and its own skills/memories."""
+    normalized = _resolve_path(path)
+    if not normalized:
+        return True
+    upload_root = _allowed_upload_root() or "/uploads/business"
+    allowed = (upload_root, "/opt/data/skills", "/opt/data/memories")
+    return not any(normalized == prefix or normalized.startswith(prefix + "/") for prefix in allowed)
+
+
 def _blocks_url(url: str) -> bool:
     normalized = _normalize(url).strip().lower()
     if normalized.startswith("file:"):
@@ -126,6 +138,11 @@ def register(ctx) -> None:
                 if _blocks_path(args.get(key, "")):
                     logger.info("business-guard blocked %s path=%s", tool, args.get(key))
                     return {"action": "block", "message": BLOCK_MESSAGE}
+            if tool in WRITE_TOOLS:
+                target = args.get("path") or args.get("file_path") or ""
+                if _blocks_write(target):
+                    logger.info("business-guard blocked write path=%s", target)
+                    return {"action": "block", "message": WRITE_BLOCK_MESSAGE}
             if tool == "search_files" and _blocks_search(args.get("path", "/opt/data")):
                 logger.info("business-guard blocked search path=%s", args.get("path", "/opt/data"))
                 return {"action": "block", "message": BLOCK_MESSAGE}

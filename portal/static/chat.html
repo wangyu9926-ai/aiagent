@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hermes Portal · 对话</title>
-  <link rel="stylesheet" href="/static/app.css?v=0.3.3">
+  <link rel="stylesheet" href="/static/app.css?v=0.3.6">
 </head>
 <body class="app-body">
   <header class="topbar">
@@ -32,6 +32,18 @@
         <span>租户</span>
         <select id="tenant-select"></select>
       </label>
+      <div class="local-bridge" id="local-bridge">
+        <div class="local-bridge-head">
+          <span>本地文件夹</span>
+          <span class="badge" id="local-badge">未连接</span>
+        </div>
+        <div class="small muted" id="local-hint">授权一个目录后，Agent 会读写它的服务器副本；改完点“同步回本地”。</div>
+        <div class="local-bridge-actions">
+          <button class="btn btn-sm" id="local-connect" type="button">连接文件夹</button>
+          <button class="btn btn-sm btn-primary" id="local-sync" type="button" hidden>同步回本地</button>
+          <button class="btn btn-sm btn-danger" id="local-disconnect" type="button" hidden>断开</button>
+        </div>
+      </div>
       <div class="conversation-list" id="conversation-list"></div>
       <div class="side-note">
         你的消息、模型调用和工具执行都会经过门户并写入审计。高风险命令需要管理员审批。
@@ -63,6 +75,6 @@
   </main>
 
   <div class="toast" id="toast" role="status" hidden></div>
-  <script src="/static/chat.js?v=0.3.3"></script>
+  <script src="/static/chat.js?v=0.3.6"></script>
 </body>
 </html>

@@ -64,6 +64,25 @@ class GuardTests(unittest.TestCase):
             for path in ("/uploads", "/uploads/visitor-hermes/a.csv", "/uploads/business2/a.csv"):
                 self.assertTrue(business_guard._blocks_path(path), path)
 
+    def test_write_allowlist(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HERMES_HOME": "/opt/data", "HERMES_BUSINESS_UPLOAD_ROOT": "/uploads/business"},
+        ):
+            for path in (
+                "/uploads/business/project/a.csv",
+                "/opt/data/skills/example/SKILL.md",
+                "/opt/data/memories/note.md",
+            ):
+                self.assertFalse(business_guard._blocks_write(path), path)
+            for path in (
+                "/tmp/a.txt",
+                "/opt/data/config.yaml",
+                "/uploads/visitor-hermes/a.csv",
+                "relative.txt",
+            ):
+                self.assertTrue(business_guard._blocks_write(path), path)
+
     def test_search_cannot_start_at_home_or_filesystem_root(self) -> None:
         with mock.patch.dict(os.environ, {"HERMES_HOME": "/opt/data"}):
             for path in (
@@ -72,6 +91,21 @@ class GuardTests(unittest.TestCase):
             ):
                 self.assertTrue(business_guard._blocks_search(path), path)
             self.assertFalse(business_guard._blocks_search("/uploads/report.csv"))
+
+    def test_pre_tool_call_blocks_writes_outside_business_tree(self) -> None:
+        ctx = FakeCtx()
+        business_guard.register(ctx)
+        hook = ctx.hooks["pre_tool_call"]
+        with mock.patch.dict(
+            os.environ,
+            {"HERMES_HOME": "/opt/data", "HERMES_BUSINESS_UPLOAD_ROOT": "/uploads/business"},
+        ):
+            allowed = hook(tool_name="write_file", args={"path": "/uploads/business/a.csv"})
+            self.assertIsNone(allowed)
+            blocked = hook(tool_name="write_file", args={"path": "/tmp/a.csv"})
+            self.assertEqual(blocked["action"], "block")
+            patched = hook(tool_name="patch", args={"path": "/opt/data/config.yaml"})
+            self.assertEqual(patched["action"], "block")
 
     def test_pre_tool_call_returns_block(self) -> None:
         ctx = FakeCtx()
