@@ -90,14 +90,16 @@ def _datalab_query(
         limit_value = int(limit)
     except (TypeError, ValueError):
         limit_value = 200
-    return _call_portal(
-        {
-            "conversation_id": cid,
-            "tables": normalized,
-            "sql": sql,
-            "limit": max(1, min(2000, limit_value)),
-        }
-    )
+    payload: dict[str, Any] = {
+        "conversation_id": cid,
+        "tables": normalized,
+        "sql": sql,
+        "limit": max(1, min(2000, limit_value)),
+    }
+    chart = args.get("chart")
+    if isinstance(chart, dict):
+        payload["chart"] = chart
+    return _call_portal(payload)
 
 
 def register(ctx) -> None:
@@ -141,6 +143,24 @@ def register(ctx) -> None:
                         "description": "Maximum result rows to return (default 200, max 2000).",
                         "minimum": 1,
                         "maximum": 2000,
+                    },
+                    "chart": {
+                        "type": "object",
+                        "description": "Optional chart generated from the query result. The result includes chart_file.url.",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["bar", "line", "pie", "scatter"],
+                            },
+                            "x": {"type": "string", "description": "X column name"},
+                            "y": {
+                                "type": ["string", "array"],
+                                "items": {"type": "string"},
+                                "description": "One y column or a list of y columns",
+                            },
+                            "title": {"type": "string"},
+                        },
+                        "required": ["x"],
                     },
                 },
                 "required": ["tables", "sql"],

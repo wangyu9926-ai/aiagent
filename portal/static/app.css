@@ -630,6 +630,8 @@ p { margin: 0; }
 }
 .message-files { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 .message-files .file-chip { max-width: 220px; }
+.message-files a.file-chip { color: var(--text); text-decoration: none; }
+.message-files a.file-chip:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
 @media (max-width: 640px) {
   .attach-btn { width: 36px; height: 36px; }
 }

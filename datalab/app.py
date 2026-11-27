@@ -7,18 +7,25 @@ arbitrary Python and never writes to the upload tree.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import decimal
 import hmac
+import io
 import math
 import os
 import re
 import threading
 import time
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 import duckdb
+import matplotlib
+
+matplotlib.use("Agg")
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 import pandas as pd
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -49,10 +56,18 @@ class TableSpec(BaseModel):
     sheet: str | int | None = None
 
 
+class ChartSpec(BaseModel):
+    type: Literal["bar", "line", "pie", "scatter"] = "bar"
+    x: str = Field(min_length=1, max_length=120)
+    y: list[str] | str | None = None
+    title: str = Field(default="", max_length=200)
+
+
 class QueryIn(BaseModel):
     tables: list[TableSpec] = Field(min_length=1, max_length=MAX_TABLES)
     sql: str = Field(min_length=1, max_length=50_000)
     limit: int = Field(default=DEFAULT_ROWS, ge=1, le=MAX_ROWS)
+    chart: ChartSpec | None = None
 
 
 def _authorized(request: Request) -> bool:
@@ -153,6 +168,60 @@ def _check_sql(sql: str) -> str:
     return text
 
 
+def _render_chart(frame: pd.DataFrame, spec: ChartSpec) -> tuple[str, str]:
+    """Return (base64 png, mime) for a small result set."""
+    if frame.empty:
+        raise ValueError("query returned no rows to chart")
+    if spec.x not in frame.columns:
+        raise ValueError(f"chart x column not found: {spec.x}")
+    if spec.y is None:
+        ys = [str(column) for column in frame.columns if column != spec.x][:4]
+    elif isinstance(spec.y, str):
+        ys = [spec.y]
+    else:
+        ys = [str(item) for item in spec.y]
+    ys = [column for column in ys if column]
+    if not ys:
+        raise ValueError("chart needs at least one y column")
+    for column in ys:
+        if column not in frame.columns:
+            raise ValueError(f"chart y column not found: {column}")
+
+    plot = frame.head(1000).copy()
+    x_values = plot[spec.x].astype(str).tolist()
+    figure = Figure(figsize=(8.2, 4.6), dpi=140)
+    canvas = FigureCanvasAgg(figure)
+    axes = figure.subplots()
+    if spec.type == "pie":
+        values = pd.to_numeric(plot[ys[0]], errors="coerce").fillna(0)
+        axes.pie(values.tolist(), labels=x_values, autopct="%1.1f%%", textprops={"fontsize": 8})
+        axes.axis("equal")
+    else:
+        for column in ys:
+            values = pd.to_numeric(plot[column], errors="coerce")
+            if spec.type == "line":
+                axes.plot(x_values, values, marker="o", linewidth=1.8, label=column)
+            elif spec.type == "scatter":
+                axes.scatter(x_values, values, label=column, alpha=0.8)
+            else:
+                axes.bar(x_values, values, label=column, alpha=0.85)
+        if len(ys) > 1:
+            axes.legend(fontsize=8)
+        axes.grid(True, axis="y", alpha=0.2)
+        axes.tick_params(axis="x", labelrotation=35, labelsize=8)
+        axes.tick_params(axis="y", labelsize=8)
+    if spec.title:
+        axes.set_title(spec.title, fontsize=11)
+    figure.tight_layout()
+    canvas.draw()
+    buffer = io.BytesIO()
+    figure.savefig(buffer, format="png", bbox_inches="tight")
+    payload = buffer.getvalue()
+    if len(payload) > 5 * 1024 * 1024:
+        raise ValueError("chart image is too large")
+    return base64.b64encode(payload).decode("ascii"), "image/png"
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "duckdb": duckdb.__version__, "pandas": pd.__version__}
@@ -202,7 +271,7 @@ def query(body: QueryIn, request: Request):
         rows = cursor.fetchmany(body.limit + 1)
         truncated = len(rows) > body.limit
         rows = rows[: body.limit]
-        return {
+        response: dict[str, Any] = {
             "columns": columns,
             "rows": [[_json_value(value) for value in row] for row in rows],
             "row_count": len(rows),
@@ -210,6 +279,14 @@ def query(body: QueryIn, request: Request):
             "tables": table_info,
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
         }
+        if body.chart is not None:
+            try:
+                png, mime = _render_chart(pd.DataFrame(rows, columns=columns), body.chart)
+                response["chart_png_base64"] = png
+                response["chart_mime"] = mime
+            except Exception as exc:
+                response["chart_error"] = str(exc)[:300]
+        return response
     except Exception as exc:
         message = str(exc).strip().replace("\n", " ")[:600]
         return JSONResponse(status_code=400, content={"error": message or type(exc).__name__})

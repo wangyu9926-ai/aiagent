@@ -6,3 +6,4 @@ openpyxl>=3.1,<4
 xlrd>=2.0,<3
 duckdb>=1.1,<2
 pyarrow>=17,<23
+matplotlib>=3.9,<4

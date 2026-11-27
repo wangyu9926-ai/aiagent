@@ -941,6 +941,18 @@
       }
       wrapper.append(files);
     }
+    const resultFiles = Array.isArray(meta) ? [] : meta?.files;
+    if (Array.isArray(resultFiles) && resultFiles.length) {
+      const files = node("div", "message-files");
+      for (const file of resultFiles) {
+        const link = node("a", "file-chip", file.name || "下载文件");
+        link.href = file.url || "#";
+        link.download = file.name || "";
+        if (file.size) link.append(node("span", "file-size", formatBytes(file.size)));
+        files.append(link);
+      }
+      wrapper.append(files);
+    }
     return wrapper;
   }
 

@@ -8,6 +8,7 @@ spine's route table.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -321,11 +322,19 @@ class DatalabTableIn(BaseModel):
     sheet: str | int | None = None
 
 
+class DatalabChartIn(BaseModel):
+    type: Literal["bar", "line", "pie", "scatter"] = "bar"
+    x: str = Field(min_length=1, max_length=120)
+    y: list[str] | str | None = None
+    title: str = Field(default="", max_length=200)
+
+
 class DatalabQueryIn(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=64)
     tables: list[DatalabTableIn] = Field(min_length=1, max_length=10)
     sql: str = Field(min_length=1, max_length=50_000)
     limit: int = Field(default=200, ge=1, le=2000)
+    chart: DatalabChartIn | None = None
 
 
 class ChatIn(BaseModel):
@@ -682,7 +691,9 @@ async def datalab_query(
                 "sheet": item.sheet,
             }
         )
-    payload = {"tables": tables, "sql": body.sql, "limit": body.limit}
+    payload: dict[str, Any] = {"tables": tables, "sql": body.sql, "limit": body.limit}
+    if body.chart is not None:
+        payload["chart"] = body.chart.model_dump()
     try:
         async with httpx.AsyncClient(
             timeout=90.0, transport=request.app.state.http_transport
@@ -702,7 +713,59 @@ async def datalab_query(
             status_code=400 if response.status_code < 500 else 502,
             detail=f"DataLab 拒绝查询：{response.text[:600]}",
         )
-    return response.json()
+    result = response.json()
+    encoded = result.pop("chart_png_base64", None)
+    if isinstance(encoded, str) and encoded:
+        try:
+            image = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            image = b""
+        if image.startswith(b"\x89PNG\r\n\x1a\n") and len(image) <= 5 * 1024 * 1024:
+            result_dir = workspace / "datalab"
+            result_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                result_dir.chmod(0o777)
+            except OSError:
+                pass
+            filename = f"chart-{secrets.token_hex(8)}.png"
+            target = result_dir / filename
+            target.write_bytes(image)
+            try:
+                target.chmod(0o666)
+            except OSError:
+                pass
+            relative = f"datalab/{filename}"
+            url = f"/api/chat/conversations/{conversation['id']}/files?path={relative}"
+            result["chart_file"] = {"path": relative, "url": url, "size": len(image)}
+            db.add_message(
+                conn,
+                conversation["id"],
+                "system",
+                f"DataLab 生成图表：{filename}",
+                meta={"files": [{"name": filename, "size": len(image), "url": url}]},
+            )
+        elif not result.get("chart_error"):
+            result["chart_error"] = "图表数据无效或过大"
+    return result
+
+
+@router.get("/api/chat/conversations/{conversation_id}/files")
+def conversation_file(
+    conversation_id: str,
+    path: str,
+    request: Request,
+    user=Depends(current_user),
+    conn=Depends(_get_conn),
+):
+    conversation = _conversation_for(conn, user, conversation_id)
+    relative = _safe_local_relpath(path)
+    if not relative.startswith("datalab/"):
+        raise HTTPException(status_code=403, detail="只能下载 DataLab 结果文件")
+    root = _local_root(request.app.state.settings, conversation).parent / "datalab"
+    target = (root / relative[len("datalab/"):]).resolve()
+    if not target.is_relative_to(root.resolve()) or not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(target, media_type="application/octet-stream", filename=target.name)
 
 
 # ---------------------------------------------------------------------------

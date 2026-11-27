@@ -495,6 +495,69 @@ class ChatTests(unittest.TestCase):
         finally:
             alice.__exit__(None, None, None)
 
+    def test_datalab_chart_is_saved_and_downloadable(self) -> None:
+        self.app.state.settings = dataclasses.replace(
+            self.app.state.settings,
+            datalab_url="http://datalab.test:8090",
+            datalab_token="worker-secret",
+        )
+        alice, csrf = self.user_client("alice", "alice-pass-123")
+        try:
+            conversation = self.make_conversation(alice, csrf)
+            upload_root = self.settings.upload_dir or self.settings.data_dir / "uploads"
+            workspace = upload_root / "team-chat" / conversation["id"] / "local"
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+            png = (
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+                "/x8AAusB9Y9Zl1sAAAAASUVORK5CYII="
+            )
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    json={
+                        "columns": ["a"],
+                        "rows": [[1]],
+                        "row_count": 1,
+                        "truncated": False,
+                        "chart_png_base64": png,
+                        "chart_mime": "image/png",
+                    },
+                )
+
+            self.app.state.http_transport = httpx.MockTransport(handler)
+            response = alice.post(
+                "/api/datalab/query",
+                json={
+                    "conversation_id": conversation["id"],
+                    "tables": [
+                        {
+                            "path": f"/uploads/team-chat/{conversation['id']}/local/data.csv",
+                            "table": "data",
+                        }
+                    ],
+                    "sql": "select a from data",
+                    "chart": {"type": "bar", "x": "a"},
+                },
+                headers={"Authorization": f"Bearer {self.tenant_token}"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertNotIn("chart_png_base64", payload)
+            self.assertEqual(payload["chart_file"]["size"], 68)
+            download = alice.get(payload["chart_file"]["url"])
+            self.assertEqual(download.status_code, 200)
+            self.assertTrue(download.content.startswith(b"\x89PNG"))
+            messages = alice.get(
+                f"/api/chat/conversations/{conversation['id']}/messages"
+            ).json()["messages"]
+            self.assertTrue(
+                any(item["meta"] and item["meta"].get("files") for item in messages)
+            )
+        finally:
+            alice.__exit__(None, None, None)
+
     def test_local_folder_bridge_round_trip(self) -> None:
         alice, csrf = self.user_client("alice", "alice-pass-123")
         try:
