@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hermes Portal · 对话</title>
   <script src="/static/theme.js?v=0.1.1"></script>
-  <link rel="stylesheet" href="/static/app.css?v=0.4.1">
+  <link rel="stylesheet" href="/static/app.css?v=0.4.2">
 </head>
 <body class="app-body">
   <header class="topbar">
@@ -13,7 +13,7 @@
       <div class="brand-mark">HP</div>
       <div>
         <div class="brand-name">Hermes Portal</div>
-        <div class="brand-sub">受监管的 Agent 对话</div>
+        <div class="brand-sub">你的 AI 工作台</div>
       </div>
     </div>
     <div class="topbar-right">
@@ -60,7 +60,7 @@
       </div>
       <div class="conversation-list" id="conversation-list"></div>
       <div class="side-note">
-        你的消息、模型调用和工具执行都会经过门户并写入审计。高风险命令需要管理员审批。
+        对话和文件处理过程会留痕，方便之后回溯；高风险操作会先请你或管理员确认。
       </div>
     </aside>
 
@@ -90,6 +90,6 @@
   </main>
 
   <div class="toast" id="toast" role="status" hidden></div>
-  <script src="/static/chat.js?v=0.4.1"></script>
+  <script src="/static/chat.js?v=0.4.2"></script>
 </body>
 </html>

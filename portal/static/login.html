@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hermes Portal · 登录</title>
   <script src="/static/theme.js?v=0.1.1"></script>
-  <link rel="stylesheet" href="/static/app.css?v=0.4.1">
+  <link rel="stylesheet" href="/static/app.css?v=0.4.2">
 </head>
 <body class="login-body">
   <main class="login-shell">
@@ -19,7 +19,7 @@
       </div>
 
       <h1>登录</h1>
-      <p class="muted">只有被授权的成员才能进入。所有对话、模型调用和工具执行都会留下审计记录。</p>
+      <p class="muted">只有被授权的成员才能进入。工作过程会留痕，方便之后回溯。</p>
 
       <form id="login-form" method="post" action="/api/auth/login">
         <label class="field">

@@ -961,8 +961,39 @@
     clear(box);
     if (!messages.length) {
       const empty = node("div", "chat-empty");
-      empty.append(node("strong", "", "开始一段受审计的对话"));
-      empty.append(node("span", "", "所有消息、模型请求、工具调用都会出现在管理员的监管台。"));
+      empty.append(node("strong", "", "今天想做什么？"));
+      empty.append(
+        node("span", "", "上传表格让我分析、生成图表，或者让我查资料、整理文档、连接本地文件夹。")
+      );
+      const actions = node("div", "chat-empty-actions");
+      const suggestions = [
+        ["分析表格", "帮我分析一份表格，先告诉我需要哪些文件和数据口径。"],
+        ["生成图表", "根据我的数据生成一张图表，先问我文件、指标和图表类型。"],
+        ["查资料", "帮我查一下："],
+        ["整理文档", "帮我整理一份文档："],
+      ];
+      for (const [label, prompt] of suggestions) {
+        const button = node("button", "quick-action", label);
+        button.type = "button";
+        button.addEventListener("click", () => {
+          const input = $("chat-input");
+          input.value = prompt;
+          input.focus();
+        });
+        actions.append(button);
+      }
+      const localButton = node("button", "quick-action", "连接本地文件夹");
+      localButton.type = "button";
+      localButton.addEventListener("click", () => {
+        if (!state.conversationId) {
+          showToast("先新建一个会话，再连接本地文件夹", "err");
+          return;
+        }
+        $("local-connect").click();
+      });
+      actions.append(localButton);
+      empty.append(actions);
+      empty.append(node("div", "chat-empty-note", "工作过程会留痕，方便之后回溯。"));
       box.append(empty);
       return;
     }

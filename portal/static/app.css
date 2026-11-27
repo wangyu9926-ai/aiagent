@@ -576,8 +576,15 @@ p { margin: 0; }
   color: var(--tag-tool); border-color: rgba(245, 158, 11, 0.4);
   background: rgba(245, 158, 11, 0.08);
 }
-.chat-empty { margin: auto; display: flex; flex-direction: column; gap: 4px; text-align: center; color: var(--muted); }
-.chat-empty strong { color: var(--text); }
+.chat-empty { margin: auto; display: flex; flex-direction: column; gap: 4px; text-align: center; color: var(--muted); max-width: 520px; }
+.chat-empty strong { color: var(--text); font-size: 17px; }
+.chat-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 10px; }
+.quick-action {
+  padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--text); font: inherit; font-size: 11px; cursor: pointer;
+}
+.quick-action:hover { border-color: var(--accent); color: var(--accent); }
+.chat-empty-note { margin-top: 10px; font-size: 11px; color: var(--muted); opacity: 0.85; }
 .chat-composer { display: flex; gap: 10px; align-items: flex-end; padding: 12px 14px; border-top: 1px solid var(--line-soft); }
 .chat-composer textarea {
   flex: 1; min-height: 64px; max-height: 200px; resize: vertical;
