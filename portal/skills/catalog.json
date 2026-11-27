@@ -2,7 +2,7 @@
   {
     "id": "data-analysis",
     "name": "数据分析",
-    "description": "读取 CSV/Excel/文本数据，做统计、对比、异常检查和结论汇总。",
+    "description": "读取 CSV/Excel/文本数据做统计与结论；有代码执行时最完整，无代码执行时只适合小文件有限统计。",
     "category": "数据",
     "roles": ["admin", "member"],
     "tenants": [],
