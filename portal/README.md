@@ -154,8 +154,19 @@ hermes tools enable --platform api_server datalab
 The tool forwards only a conversation id, up to 10 file paths inside that conversation workspace,
 one SELECT/WITH query, and a row limit. The portal checks tenant token + workspace path, then calls
 DataLab with `DATALAB_TOKEN`. DataLab rejects writes, DDL, multiple statements, file-reading table
-functions and external database functions. Database connectors for later phases should live in
-DataLab and keep credentials server-side, never in the tenant prompt or browser.
+functions and external database functions.
+
+Database connectors live in `datalab/connections.json` and never enter the tenant:
+
+- `datalab_databases` returns only connection ids/type/description allowed for the **conversation
+  owner's portal role**; `datalab_db_query` runs one read-only SELECT/WITH against that connection.
+- The shipped demo seeds `sales_demo` (admin + member) and `finance_demo` (admin only) into a
+  Docker volume when `DATALAB_SEED_DEMO=1`.
+- Set `DATALAB_SEED_DEMO=0`, replace the demo connections with real read-only connections, and add
+  a Postgres/MySQL adapter in `datalab/app.py` for production. Keep passwords in server-side config
+  or a secret store, never in the browser or tenant prompt.
+- This is connection-level role gating. Metric-level permissions, row-level filters and a proper
+  data-role model are the next layer; do not expose a production database until those are defined.
 
 ## Local folder bridge
 

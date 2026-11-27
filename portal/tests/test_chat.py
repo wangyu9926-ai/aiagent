@@ -495,6 +495,54 @@ class ChatTests(unittest.TestCase):
         finally:
             alice.__exit__(None, None, None)
 
+    def test_datalab_database_connections_use_conversation_owner_role(self) -> None:
+        self.app.state.settings = dataclasses.replace(
+            self.app.state.settings,
+            datalab_url="http://datalab.test:8090",
+            datalab_token="worker-secret",
+        )
+        alice, csrf = self.user_client("alice", "alice-pass-123")
+        try:
+            conversation = self.make_conversation(alice, csrf)
+            seen = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/db/connections":
+                    seen["role"] = request.url.params.get("role")
+                    return httpx.Response(
+                        200,
+                        json={
+                            "connections": [
+                                {"id": "sales_demo", "type": "sqlite", "description": "sales"}
+                            ],
+                            "role": seen["role"],
+                        },
+                    )
+                seen["db_body"] = json.loads(request.content)
+                return httpx.Response(403, json={"error": "connection is not allowed for this role"})
+
+            self.app.state.http_transport = httpx.MockTransport(handler)
+            listing = alice.get(
+                "/api/datalab/databases",
+                params={"conversation_id": conversation["id"]},
+                headers={"Authorization": f"Bearer {self.tenant_token}"},
+            )
+            self.assertEqual(listing.status_code, 200, listing.text)
+            self.assertEqual(seen["role"], "member")
+            denied = alice.post(
+                "/api/datalab/db-query",
+                json={
+                    "conversation_id": conversation["id"],
+                    "connection": "finance_demo",
+                    "sql": "select 1",
+                },
+                headers={"Authorization": f"Bearer {self.tenant_token}"},
+            )
+            self.assertEqual(denied.status_code, 400)
+            self.assertEqual(seen["db_body"]["role"], "member")
+        finally:
+            alice.__exit__(None, None, None)
+
     def test_datalab_chart_is_saved_and_downloadable(self) -> None:
         self.app.state.settings = dataclasses.replace(
             self.app.state.settings,

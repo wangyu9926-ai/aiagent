@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -102,6 +103,94 @@ def _datalab_query(
     return _call_portal(payload)
 
 
+def _call_portal_get(path: str, params: dict[str, Any]) -> str:
+    base = os.environ.get("HERMES_PORTAL_URL", "").rstrip("/")
+    token = os.environ.get("HERMES_PORTAL_TOKEN", "").strip()
+    if not base or not token:
+        return _error("DataLab is not configured for this tenant")
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        base + path + ("?" + query if query else ""),
+        method="GET",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "hermes-datalab/0.1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8", "replace") or "{}")
+            return json.dumps({"success": True, **data}, ensure_ascii=False)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        return _error(f"DataLab HTTP {exc.code}: {body[:800]}")
+    except Exception as exc:
+        logger.warning("datalab DB list failed: %s", exc)
+        return _error(f"DataLab request failed: {exc}")
+
+
+def _datalab_databases(
+    args: dict[str, Any],
+    conversation_id: str | None = None,
+    session_id: str | None = None,
+    **_: Any,
+) -> str:
+    cid = (conversation_id or session_id or "").strip()
+    if not cid:
+        return _error("No conversation id in this tool context")
+    return _call_portal_get("/api/datalab/databases", {"conversation_id": cid})
+
+
+def _datalab_db_query(
+    args: dict[str, Any],
+    conversation_id: str | None = None,
+    session_id: str | None = None,
+    **_: Any,
+) -> str:
+    cid = (conversation_id or session_id or "").strip()
+    if not cid:
+        return _error("No conversation id in this tool context")
+    connection = str(args.get("connection") or "").strip()
+    sql = str(args.get("sql") or "").strip()
+    if not connection:
+        return _error("connection is required; call datalab_databases first")
+    if not sql:
+        return _error("sql is required")
+    try:
+        limit = max(1, min(2000, int(args.get("limit", 200))))
+    except (TypeError, ValueError):
+        limit = 200
+    base = os.environ.get("HERMES_PORTAL_URL", "").rstrip("/")
+    token = os.environ.get("HERMES_PORTAL_TOKEN", "").strip()
+    if not base or not token:
+        return _error("DataLab is not configured for this tenant")
+    request = urllib.request.Request(
+        base + "/api/datalab/db-query",
+        data=json.dumps(
+            {"conversation_id": cid, "connection": connection, "sql": sql, "limit": limit},
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "hermes-datalab/0.1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            data = json.loads(response.read().decode("utf-8", "replace") or "{}")
+            return json.dumps({"success": True, **data}, ensure_ascii=False)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        return _error(f"DataLab HTTP {exc.code}: {body[:800]}")
+    except Exception as exc:
+        logger.warning("datalab DB query failed: %s", exc)
+        return _error(f"DataLab request failed: {exc}")
+
+
 def register(ctx) -> None:
     ctx.register_tool(
         name="datalab_query",
@@ -169,4 +258,49 @@ def register(ctx) -> None:
         handler=lambda args, **kwargs: _datalab_query(args, **kwargs),
         check_fn=_enabled,
         emoji="📊",
+    )
+    ctx.register_tool(
+        name="datalab_databases",
+        toolset=TOOLSET,
+        schema={
+            "name": "datalab_databases",
+            "description": (
+                "List server-side database connections allowed for the current portal user. "
+                "Returns only id, type and description — never credentials. Call this before "
+                "datalab_db_query; if a database is absent, the user has no permission for it."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+        handler=lambda args, **kwargs: _datalab_databases(args, **kwargs),
+        check_fn=_enabled,
+        emoji="🗄️",
+    )
+    ctx.register_tool(
+        name="datalab_db_query",
+        toolset=TOOLSET,
+        schema={
+            "name": "datalab_db_query",
+            "description": (
+                "Run one read-only SELECT/WITH query against an allowed server-side database "
+                "connection. Credentials never enter the tenant. Roles are enforced by the portal "
+                "and worker; a denied connection returns an error with no data."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection": {"type": "string", "description": "Connection id from datalab_databases"},
+                    "sql": {"type": "string", "description": "One SELECT or WITH query"},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2000,
+                        "description": "Maximum result rows (default 200)",
+                    },
+                },
+                "required": ["connection", "sql"],
+            },
+        },
+        handler=lambda args, **kwargs: _datalab_db_query(args, **kwargs),
+        check_fn=_enabled,
+        emoji="🗄️",
     )

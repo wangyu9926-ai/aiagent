@@ -9,6 +9,15 @@
     "entry": "data-analysis.md"
   },
   {
+    "id": "database-analysis",
+    "name": "数据库分析",
+    "description": "通过服务端只读连接查数据库；先看账号有权限的连接，再写只读 SQL。",
+    "category": "数据",
+    "roles": ["admin", "member"],
+    "tenants": [],
+    "entry": "database-analysis.md"
+  },
+  {
     "id": "web-research",
     "name": "资料调研",
     "description": "用网页搜索/浏览器收集资料，交叉核对来源并输出带出处的结论。",

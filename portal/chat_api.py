@@ -337,6 +337,13 @@ class DatalabQueryIn(BaseModel):
     chart: DatalabChartIn | None = None
 
 
+class DatalabDbQueryIn(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=64)
+    connection: str = Field(min_length=1, max_length=80)
+    sql: str = Field(min_length=1, max_length=50_000)
+    limit: int = Field(default=200, ge=1, le=2000)
+
+
 class ChatIn(BaseModel):
     content: str = Field(min_length=1, max_length=32000)
     attachment_ids: list[str] = Field(default_factory=list, max_length=5)
@@ -747,6 +754,88 @@ async def datalab_query(
         elif not result.get("chart_error"):
             result["chart_error"] = "图表数据无效或过大"
     return result
+
+
+def _tenant_role_context(request: Request, conn, conversation_id: str) -> tuple[dict[str, Any], dict[str, Any], str]:
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="缺少 Bearer 租户令牌")
+    tenant = db.get_tenant_by_token(conn, header[7:].strip())
+    if tenant is None:
+        raise HTTPException(status_code=401, detail="租户令牌无效或已停用")
+    conversation = db.get_conversation(conn, conversation_id)
+    if conversation is None or conversation["tenant_id"] != tenant["id"]:
+        raise HTTPException(status_code=404, detail="会话不存在或不属于该租户")
+    owner = db.get_user(conn, conversation["user_id"])
+    if owner is None:
+        raise HTTPException(status_code=403, detail="会话用户不存在")
+    return tenant, conversation, str(owner["role"])
+
+
+@router.get("/api/datalab/databases")
+async def datalab_databases(
+    conversation_id: str,
+    request: Request,
+    conn=Depends(_get_conn),
+):
+    _tenant, _conversation, role = _tenant_role_context(request, conn, conversation_id)
+    settings = request.app.state.settings
+    if not settings.datalab_url or not settings.datalab_token:
+        raise HTTPException(status_code=503, detail="DataLab 尚未配置")
+    try:
+        async with httpx.AsyncClient(
+            timeout=30.0, transport=request.app.state.http_transport
+        ) as client:
+            response = await client.get(
+                settings.datalab_url.rstrip("/") + "/db/connections",
+                params={"role": role},
+                headers={"X-Datalab-Token": settings.datalab_token},
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"DataLab 连接失败：{exc}") from exc
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=400 if response.status_code < 500 else 502,
+            detail=f"DataLab 拒绝连接列表：{response.text[:500]}",
+        )
+    return response.json()
+
+
+@router.post("/api/datalab/db-query")
+async def datalab_db_query(
+    body: DatalabDbQueryIn,
+    request: Request,
+    conn=Depends(_get_conn),
+):
+    _tenant, _conversation, role = _tenant_role_context(request, conn, body.conversation_id)
+    settings = request.app.state.settings
+    if not settings.datalab_url or not settings.datalab_token:
+        raise HTTPException(status_code=503, detail="DataLab 尚未配置")
+    try:
+        async with httpx.AsyncClient(
+            timeout=90.0, transport=request.app.state.http_transport
+        ) as client:
+            response = await client.post(
+                settings.datalab_url.rstrip("/") + "/db/query",
+                headers={
+                    "X-Datalab-Token": settings.datalab_token,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "connection": body.connection,
+                    "sql": body.sql,
+                    "limit": body.limit,
+                    "role": role,
+                },
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"DataLab 连接失败：{exc}") from exc
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=400 if response.status_code < 500 else 502,
+            detail=f"DataLab 拒绝数据库查询：{response.text[:600]}",
+        )
+    return response.json()
 
 
 @router.get("/api/chat/conversations/{conversation_id}/files")

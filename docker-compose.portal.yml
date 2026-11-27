@@ -37,9 +37,13 @@ services:
     environment:
       DATALAB_TOKEN: "${DATALAB_TOKEN:-}"
       DATALAB_UPLOAD_ROOT: /uploads
+      DATALAB_CONNECTIONS_FILE: /config/connections.json
+      DATALAB_SEED_DEMO: "1"
     volumes:
       # Read-only: the worker never writes user files.
       - ./portal/.e2e-data/uploads:/uploads:ro
+      - ./datalab/connections.json:/config/connections.json:ro
+      - hermes-datalab-data:/data
     networks:
       - hermes-tenant-net
 
@@ -169,3 +173,4 @@ volumes:
     external: true
   caddy-data:
   caddy-config:
+  hermes-datalab-data:

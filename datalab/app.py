@@ -12,9 +12,11 @@ import datetime as dt
 import decimal
 import hmac
 import io
+import json
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 from pathlib import Path, PurePosixPath
@@ -39,6 +41,9 @@ MAX_TABLES = int(os.environ.get("DATALAB_MAX_TABLES", "10"))
 DEFAULT_ROWS = int(os.environ.get("DATALAB_DEFAULT_ROWS", "200"))
 MAX_ROWS = int(os.environ.get("DATALAB_MAX_ROWS", "2000"))
 TIMEOUT_SECONDS = float(os.environ.get("DATALAB_TIMEOUT", "60"))
+CONNECTIONS_FILE = Path(os.environ.get("DATALAB_CONNECTIONS_FILE", "/config/connections.json"))
+SEED_DEMO = os.environ.get("DATALAB_SEED_DEMO", "0").strip().lower() in {"1", "true", "yes", "on"}
+DATA_ROOT = Path(os.environ.get("DATALAB_DATA_ROOT", "/data"))
 
 BLOCKED_SQL = re.compile(
     r"(?is)\b(attach|detach|copy|export|import|install|load|pragma|call|execute|"
@@ -68,6 +73,60 @@ class QueryIn(BaseModel):
     sql: str = Field(min_length=1, max_length=50_000)
     limit: int = Field(default=DEFAULT_ROWS, ge=1, le=MAX_ROWS)
     chart: ChartSpec | None = None
+
+
+class DbQueryIn(BaseModel):
+    connection: str = Field(min_length=1, max_length=80)
+    sql: str = Field(min_length=1, max_length=50_000)
+    limit: int = Field(default=DEFAULT_ROWS, ge=1, le=MAX_ROWS)
+    role: str = Field(default="member", max_length=40)
+
+
+def _load_connections() -> dict[str, dict[str, Any]]:
+    try:
+        raw = json.loads(CONNECTIONS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): value for key, value in raw.items() if isinstance(value, dict)}
+
+
+def _seed_demo() -> None:
+    """Create local read-only demo DBs when explicitly enabled."""
+    if not SEED_DEMO:
+        return
+    try:
+        DATA_ROOT.mkdir(parents=True, exist_ok=True)
+        sales_path = DATA_ROOT / "sales_demo.db"
+        with sqlite3.connect(sales_path) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS sales (region TEXT, month TEXT, amount REAL)"
+            )
+            if connection.execute("SELECT COUNT(*) FROM sales").fetchone()[0] == 0:
+                rows = [
+                    (region, f"2026-{month:02d}", amount)
+                    for region, base in (("A", 12000), ("B", 12250), ("C", 12500), ("D", 12750))
+                    for month in range(1, 13)
+                    for amount in (base + month * 10,)
+                ]
+                connection.executemany("INSERT INTO sales VALUES (?, ?, ?)", rows)
+        finance_path = DATA_ROOT / "finance_demo.db"
+        with sqlite3.connect(finance_path) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS profit (month TEXT, revenue REAL, cost REAL, profit REAL)"
+            )
+            if connection.execute("SELECT COUNT(*) FROM profit").fetchone()[0] == 0:
+                rows = [
+                    (f"2026-{month:02d}", 100000 + month * 5000, 70000 + month * 3000, 30000 + month * 2000)
+                    for month in range(1, 13)
+                ]
+                connection.executemany("INSERT INTO profit VALUES (?, ?, ?, ?)", rows)
+    except Exception as exc:  # pragma: no cover - startup diagnostic
+        print(f"datalab demo seed skipped: {exc}", flush=True)
+
+
+_seed_demo()
 
 
 def _authorized(request: Request) -> bool:
@@ -220,6 +279,73 @@ def _render_chart(frame: pd.DataFrame, spec: ChartSpec) -> tuple[str, str]:
     if len(payload) > 5 * 1024 * 1024:
         raise ValueError("chart image is too large")
     return base64.b64encode(payload).decode("ascii"), "image/png"
+
+
+@app.get("/db/connections")
+def db_connections(request: Request, role: str = "member"):
+    if not _authorized(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    items = []
+    for name, cfg in _load_connections().items():
+        roles = [str(item) for item in (cfg.get("roles") or ["admin"])]
+        if role != "admin" and role not in roles:
+            continue
+        items.append(
+            {
+                "id": name,
+                "type": str(cfg.get("type") or "sqlite"),
+                "description": str(cfg.get("description") or ""),
+            }
+        )
+    return {"connections": items, "role": role}
+
+
+@app.post("/db/query")
+def db_query(body: DbQueryIn, request: Request):
+    if not _authorized(request):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    connections = _load_connections()
+    cfg = connections.get(body.connection)
+    if cfg is None:
+        return JSONResponse(status_code=404, content={"error": "connection not found"})
+    roles = [str(item) for item in (cfg.get("roles") or ["admin"])]
+    if body.role != "admin" and body.role not in roles:
+        return JSONResponse(status_code=403, content={"error": "connection is not allowed for this role"})
+    if str(cfg.get("type") or "sqlite") != "sqlite":
+        return JSONResponse(
+            status_code=400,
+            content={"error": "only the SQLite demo adapter is configured; add a DB adapter for this type"},
+        )
+    try:
+        sql = _check_sql(body.sql)
+        path = Path(str(cfg.get("path") or "")).expanduser().resolve()
+        if not path.is_relative_to(DATA_ROOT.resolve()) or not path.is_file():
+            raise ValueError("connection database file is not available")
+        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5)
+        deadline = time.monotonic() + TIMEOUT_SECONDS
+        connection.set_progress_handler(
+            lambda: 1 if time.monotonic() > deadline else 0,
+            10_000,
+        )
+        started = time.monotonic()
+        try:
+            cursor = connection.execute(sql)
+            columns = [str(item[0]) for item in (cursor.description or [])]
+            rows = cursor.fetchmany(body.limit + 1)
+            truncated = len(rows) > body.limit
+            rows = rows[: body.limit]
+        finally:
+            connection.close()
+        return {
+            "connection": body.connection,
+            "columns": columns,
+            "rows": [[_json_value(value) for value in row] for row in rows],
+            "row_count": len(rows),
+            "truncated": truncated,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+        }
+    except Exception as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc).strip()[:600]})
 
 
 @app.get("/health")

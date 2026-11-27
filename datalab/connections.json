@@ -1,0 +1,14 @@
+{
+  "sales_demo": {
+    "type": "sqlite",
+    "path": "/data/sales_demo.db",
+    "description": "演示销售库（普通成员可查，只读）",
+    "roles": ["admin", "member"]
+  },
+  "finance_demo": {
+    "type": "sqlite",
+    "path": "/data/finance_demo.db",
+    "description": "演示财务库（仅管理员，只读）",
+    "roles": ["admin"]
+  }
+}
