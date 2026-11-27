@@ -1,6 +1,13 @@
 # LAN/internal HTTPS with Caddy's local CA. Clients must trust Caddy's
 # root certificate (`docker exec hermes-caddy cat /data/caddy/pki/authorities/local/root.crt`)
 # or the browser will warn. Use Caddyfile with a real domain for public use.
+#
+# Browsers/Python do not send SNI for a bare IP address; default_sni makes the
+# IP-addressed certificate the fallback instead of failing the handshake.
+{
+	default_sni {$PORTAL_DOMAIN:localhost}
+}
+
 {$PORTAL_DOMAIN:localhost} {
 	tls internal
 	encode zstd gzip
